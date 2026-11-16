@@ -3,8 +3,8 @@
 
 mod common;
 
-use reason_network::mcp::{AskUserArgs, CheckInboxArgs, ReasonMcpServer, SendMessageArgs};
-use reason_network::protocol::Method;
+use crosstalk::mcp::{AskUserArgs, CheckInboxArgs, ReasonMcpServer, SendMessageArgs};
+use crosstalk::protocol::Method;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
 
@@ -55,6 +55,7 @@ async fn send_message_delivers_to_the_recipient() {
     let server = server(&daemon, "alice");
     let output = server
         .send_message(Parameters(SendMessageArgs {
+            reply_to: None,
             to: "bob".into(),
             message: "ping from the MCP tool".into(),
         }))
@@ -172,6 +173,7 @@ async fn sending_to_an_unknown_session_fails() {
     let server = server(&daemon, "alice");
     let error = server
         .send_message(Parameters(SendMessageArgs {
+            reply_to: None,
             to: "nobody".into(),
             message: "hello".into(),
         }))

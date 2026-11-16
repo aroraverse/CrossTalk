@@ -1,5 +1,5 @@
 #!/bin/sh
-# Reason Network installer for macOS and Linux.
+# Crosstalk installer for macOS and Linux.
 #
 #   sh install.sh [options]
 #
@@ -9,7 +9,7 @@
 #   --from-dir DIR      install from a local directory holding SHA256SUMS and the
 #                       release packages, instead of downloading
 #   --repo OWNER/NAME   GitHub repository to download from
-#                       (default: $REASON_NETWORK_REPO)
+#                       (default: $CROSSTALK_REPO)
 #   --target TRIPLE     override platform detection (testing)
 #   --uninstall         remove the executable and its service; keep user data
 #   --purge-data        with --uninstall: also delete the data directory
@@ -21,11 +21,11 @@
 
 set -eu
 
-PRODUCT="reason-network"
+PRODUCT="crosstalk"
 VERSION=""
-INSTALL_DIR="${REASON_NETWORK_INSTALL_DIR:-${HOME}/.local/bin}"
+INSTALL_DIR="${CROSSTALK_INSTALL_DIR:-${HOME}/.local/bin}"
 FROM_DIR=""
-REPO="${REASON_NETWORK_REPO:-}"
+REPO="${CROSSTALK_REPO:-}"
 TARGET=""
 UNINSTALL=0
 PURGE=0
@@ -60,8 +60,8 @@ done
 BIN="${INSTALL_DIR}/${PRODUCT}"
 
 data_dir() {
-    if [ -n "${REASON_NETWORK_DATA_DIR:-}" ]; then
-        printf '%s\n' "$REASON_NETWORK_DATA_DIR"
+    if [ -n "${CROSSTALK_DATA_DIR:-}" ]; then
+        printf '%s\n' "$CROSSTALK_DATA_DIR"
     elif [ -n "${XDG_DATA_HOME:-}" ]; then
         printf '%s\n' "${XDG_DATA_HOME}/${PRODUCT}"
     else
@@ -89,8 +89,8 @@ if [ "$UNINSTALL" -eq 1 ]; then
         say "data directory kept: ${DATA} (pass --purge-data to delete it)"
     fi
     say "agent configurations may still list the MCP server; remove it with"
-    say "  claude mcp remove reason-network --scope user"
-    say "  codex mcp remove reason-network"
+    say "  claude mcp remove crosstalk --scope user"
+    say "  codex mcp remove crosstalk"
     exit 0
 fi
 [ "$PURGE" -eq 0 ] || fail "--purge-data is only valid with --uninstall"
@@ -134,14 +134,14 @@ if [ -z "$FROM_DIR" ]; then
     else
         fail "missing dependency: curl or wget (or use --from-dir with downloaded files)"
     fi
-    [ -n "$REPO" ] || fail "no repository given: pass --repo OWNER/NAME or set REASON_NETWORK_REPO (or use --from-dir)"
+    [ -n "$REPO" ] || fail "no repository given: pass --repo OWNER/NAME or set CROSSTALK_REPO (or use --from-dir)"
     case "$REPO" in
         */*) ;;
         *) fail "--repo must look like OWNER/NAME" ;;
     esac
 fi
 
-TMP="$(mktemp -d 2>/dev/null || mktemp -d -t reason-network)"
+TMP="$(mktemp -d 2>/dev/null || mktemp -d -t crosstalk)"
 
 fetch() { # fetch <name> <dest> [<version>]
     if [ -n "$FROM_DIR" ]; then

@@ -9,11 +9,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reason_network::config::Config;
-use reason_network::daemon::Daemon;
-use reason_network::error::Error;
-use reason_network::ipc;
-use reason_network::protocol::{Method, Request, Response};
+use crosstalk::config::Config;
+use crosstalk::daemon::Daemon;
+use crosstalk::error::Error;
+use crosstalk::ipc;
+use crosstalk::protocol::{Method, Request, Response};
 use tempfile::TempDir;
 
 /// A daemon running on a temporary data directory.
@@ -27,6 +27,17 @@ pub struct TestDaemon {
 }
 
 impl TestDaemon {
+    /// Start a daemon with the dashboard HTTP server bound to an ephemeral
+    /// loopback port. Returns the daemon; read the port with
+    /// [`TestDaemon::dashboard_addr`].
+    pub async fn start_with_dashboard() -> Self {
+        let dir = Arc::new(tempfile::tempdir().expect("temporary directory"));
+        let config = Config::with_data_dir(dir.path())
+            .with_net_options(crosstalk::net::NetOptions::offline())
+            .with_dashboard_addr(Some("127.0.0.1:0".to_string()));
+        Self::start_with_config(config, dir).await
+    }
+
     /// Start a daemon on a fresh temporary directory.
     ///
     /// Networking is enabled but offline: direct connections only, no relay
@@ -40,7 +51,8 @@ impl TestDaemon {
     pub async fn start_in(dir: TempDir) -> Self {
         let dir = Arc::new(dir);
         let config = Config::with_data_dir(dir.path())
-            .with_net_options(reason_network::net::NetOptions::offline());
+            .with_net_options(crosstalk::net::NetOptions::offline())
+            .with_dashboard_addr(None);
         Self::start_with_config(config, dir).await
     }
 
@@ -116,7 +128,8 @@ impl TestDaemon {
     pub async fn restart(&self) -> TestDaemon {
         self.stop().await;
         let config = Config::with_data_dir(self.config.data_dir.clone())
-            .with_net_options(self.config.net.clone());
+            .with_net_options(self.config.net.clone())
+            .with_dashboard_addr(None);
         let daemon = Daemon::new(config.clone()).expect("daemon");
         let runner = Arc::clone(&daemon);
         tokio::spawn(async move {
@@ -134,6 +147,17 @@ impl TestDaemon {
     /// The data directory of this daemon.
     pub fn data_dir(&self) -> &Path {
         &self.config.data_dir
+    }
+
+    /// Wait until the dashboard HTTP server has bound, then return its address.
+    pub async fn dashboard_addr(&self) -> std::net::SocketAddr {
+        for _ in 0..100 {
+            if let Some(addr) = self.daemon.dashboard_addr() {
+                return addr;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("dashboard did not bind");
     }
 
     /// Machine identity and network status.

@@ -59,7 +59,20 @@ pub struct Message {
     pub state: String,
     /// `1` once the message has been handed to a push delivery target.
     pub delivered: bool,
+    /// Id of the message (or question) this one answers, when it is a reply.
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// Conversation thread: the id of the first message of the exchange.
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
+
+/// Columns every message query selects, in the order [`row_to_message`] reads.
+const MESSAGE_COLUMNS: &str =
+    "id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id";
+
+/// Sender key reserved for the human operator. No agent or peer may use it.
+pub const HUMAN_SENDER: &str = "human";
 
 /// A question an agent asked a human.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -151,6 +164,38 @@ pub struct RemoteSession {
     pub activity: String,
     /// Last seen time reported by the owner.
     pub last_seen: i64,
+    /// Repository the session works in, when the owner reported it.
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+/// A file an agent session touched in a repository, used to warn about two
+/// agents editing overlapping files at the same time (M4).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileActivity {
+    /// Session that touched the file.
+    pub session_key: String,
+    /// Repository the file belongs to (best effort, from the hook).
+    pub repo: Option<String>,
+    /// Path of the file, relative to the repository when known.
+    pub path: String,
+    /// `read`, `edit` or `write`.
+    pub action: String,
+    /// When the file was last touched (unix seconds).
+    pub updated_at: i64,
+}
+
+/// Two sessions found to be editing the same file in the same repository (M4).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileOverlap {
+    /// Repository the overlap was detected in (empty when unknown).
+    pub repo: String,
+    /// The shared file path.
+    pub path: String,
+    /// Session keys editing that file, most recent first.
+    pub sessions: Vec<String>,
+    /// Most recent touch across those sessions (unix seconds).
+    pub last_activity: i64,
 }
 
 /// An outgoing message waiting for or awaiting acknowledgement.
@@ -168,14 +213,31 @@ pub struct OutboundMessage {
     pub created_at: i64,
     /// Destination machine.
     pub peer_id: Option<String>,
+    /// Message being replied to, if any.
+    pub reply_to: Option<String>,
+    /// Conversation thread id.
+    pub thread_id: Option<String>,
 }
 
 /// The SQLite store. Not thread safe on its own; the daemon wraps it in a mutex.
 pub struct Store {
     conn: Connection,
+    /// Bumped whenever a message is stored; lets waiters sleep until
+    /// something arrives instead of polling the database.
+    events: tokio::sync::watch::Sender<u64>,
 }
 
 impl Store {
+    /// Subscribe to message arrivals. Subscribe *before* checking for a
+    /// message so a message that lands in between is never missed.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.events.subscribe()
+    }
+
+    fn bump(&self) {
+        self.events.send_modify(|epoch| *epoch += 1);
+    }
+
     /// Open (or create) the database at `path` and apply the schema.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -292,6 +354,19 @@ impl Store {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            -- M4: files each local session is editing, for overlap warnings.
+            CREATE TABLE IF NOT EXISTS file_activity (
+                session_key TEXT NOT NULL,
+                repo        TEXT,
+                path        TEXT NOT NULL,
+                action      TEXT NOT NULL DEFAULT 'edit',
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (session_key, path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_file_activity_path
+                ON file_activity (repo, path, updated_at);
             "#,
         )?;
 
@@ -299,6 +374,12 @@ impl Store {
         // migrated in place; new databases get them here.
         add_column_if_missing(&conn, "messages", "origin", "TEXT NOT NULL DEFAULT 'local'")?;
         add_column_if_missing(&conn, "messages", "peer_id", "TEXT")?;
+        add_column_if_missing(&conn, "messages", "reply_to", "TEXT")?;
+        add_column_if_missing(&conn, "messages", "thread_id", "TEXT")?;
+        add_column_if_missing(&conn, "remote_sessions", "repo", "TEXT")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_messages_reply ON messages (reply_to, recipient_key);",
+        )?;
         add_column_if_missing(&conn, "messages", "remote_id", "TEXT")?;
         add_column_if_missing(
             &conn,
@@ -315,7 +396,8 @@ impl Store {
             "#,
         )?;
 
-        Ok(Store { conn })
+        let (events, _) = tokio::sync::watch::channel(0u64);
+        Ok(Store { conn, events })
     }
 
     /// Register or refresh a session.
@@ -335,6 +417,11 @@ impl Store {
             Some(key) if !key.is_empty() => key.to_string(),
             _ => new_id("sess"),
         };
+        if session_key.eq_ignore_ascii_case(HUMAN_SENDER) {
+            return Err(Error::InvalidRequest(format!(
+                "`{HUMAN_SENDER}` is reserved for the human operator and cannot be a session key"
+            )));
+        }
 
         let now = now_seconds();
         let existing: Option<i64> = self
@@ -456,6 +543,8 @@ impl Store {
         if self.get_session(key)?.is_none() {
             return Err(Error::NotFound(format!("session {key}")));
         }
+        // Every update, even an empty one, is a heartbeat.
+        self.touch(key)?;
 
         if let Some(status) = params.status {
             self.conn.execute(
@@ -532,8 +621,12 @@ impl Store {
             return Err(Error::NotFound(format!("recipient session {recipient}")));
         }
 
+        let (reply_to, thread_id) = self.thread_for(params.reply_to.as_deref())?;
+        let id = new_id("msg");
         let message = Message {
-            id: new_id("msg"),
+            thread_id: Some(thread_id.unwrap_or_else(|| id.clone())),
+            reply_to,
+            id,
             sender_key: sender.to_string(),
             recipient_key: recipient.to_string(),
             body: params.body,
@@ -543,8 +636,9 @@ impl Store {
         };
 
         self.conn.execute(
-            "INSERT INTO messages (id, sender_key, recipient_key, body, created_at, state, delivered)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages
+                 (id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 message.id,
                 message.sender_key,
@@ -553,10 +647,87 @@ impl Store {
                 message.created_at,
                 message.state,
                 i64::from(message.delivered),
+                message.reply_to,
+                message.thread_id,
             ],
         )?;
 
+        self.bump();
         Ok(message)
+    }
+
+    /// Validate a `reply_to` reference and find the thread it belongs to.
+    ///
+    /// The reference must be a known message or question id, so a typo cannot
+    /// silently produce a reply nobody will ever match.
+    fn thread_for(&self, reply_to: Option<&str>) -> Result<(Option<String>, Option<String>)> {
+        let Some(reference) = reply_to.map(str::trim).filter(|r| !r.is_empty()) else {
+            return Ok((None, None));
+        };
+        let parent: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT thread_id FROM messages WHERE id = ?1",
+                params![reference],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(thread) = parent {
+            return Ok((
+                Some(reference.to_string()),
+                Some(thread.unwrap_or_else(|| reference.to_string())),
+            ));
+        }
+        let is_question: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM questions WHERE id = ?1",
+                params![reference],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if is_question {
+            return Ok((Some(reference.to_string()), Some(reference.to_string())));
+        }
+        Err(Error::InvalidRequest(format!(
+            "reply_to `{reference}` is not a known message or question id"
+        )))
+    }
+
+    /// The oldest message addressed to `session_key` that replies to
+    /// `reply_to`, optionally only from `from`. Unrelated messages never match.
+    pub fn find_reply(
+        &self,
+        session_key: &str,
+        reply_to: &str,
+        from: Option<&str>,
+    ) -> Result<Option<Message>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM messages
+                     WHERE recipient_key = ?1 AND reply_to = ?2
+                       AND (?3 IS NULL OR sender_key = ?3)
+                     ORDER BY created_at ASC, id ASC LIMIT 1"
+                ),
+                params![session_key, reply_to, from],
+                row_to_message,
+            )
+            .optional()?)
+    }
+
+    /// Fetch one message by id.
+    pub fn get_message(&self, id: &str) -> Result<Option<Message>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1"),
+                params![id],
+                row_to_message,
+            )
+            .optional()?)
     }
 
     /// Fetch a session's inbox, oldest message first.
@@ -568,7 +739,7 @@ impl Store {
         let unread_only = params.unread_only.unwrap_or(false);
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, sender_key, recipient_key, body, created_at, state, delivered
+            "SELECT id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id
              FROM messages
              WHERE recipient_key = ?1 AND (?2 = 0 OR state = 'unread')
              ORDER BY created_at ASC, id ASC
@@ -627,7 +798,7 @@ impl Store {
     /// Messages that still need to be handed to a push delivery target.
     pub fn undelivered_messages(&self) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, sender_key, recipient_key, body, created_at, state, delivered
+            "SELECT id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id
              FROM messages WHERE delivered = 0 ORDER BY created_at ASC",
         )?;
         let messages = stmt
@@ -717,18 +888,23 @@ impl Store {
         )?;
 
         // The answer reaches the agent as an ordinary inbox message.
+        // The answer is correlated to the question, so the asking agent can
+        // wait for exactly this reply.
         let message = Message {
             id: new_id("msg"),
-            sender_key: "human".to_string(),
+            sender_key: HUMAN_SENDER.to_string(),
             recipient_key: question.session_key.clone(),
             body: params.answer.clone(),
             created_at: now,
             state: "unread".to_string(),
             delivered: false,
+            reply_to: Some(question.id.clone()),
+            thread_id: Some(question.id.clone()),
         };
         self.conn.execute(
-            "INSERT INTO messages (id, sender_key, recipient_key, body, created_at, state, delivered)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages
+                 (id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 message.id,
                 message.sender_key,
@@ -737,9 +913,12 @@ impl Store {
                 message.created_at,
                 message.state,
                 i64::from(message.delivered),
+                message.reply_to,
+                message.thread_id,
             ],
         )?;
 
+        self.bump();
         Ok(Question {
             status: "answered".to_string(),
             answer: Some(params.answer),
@@ -1039,8 +1218,8 @@ impl Store {
         for session in sessions {
             self.conn.execute(
                 "INSERT OR REPLACE INTO remote_sessions
-                     (session_key, peer_id, name, agent_type, status, activity, last_seen, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     (session_key, peer_id, name, agent_type, status, activity, last_seen, updated_at, repo)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     session.session_key,
                     peer_id,
@@ -1049,7 +1228,8 @@ impl Store {
                     session.status,
                     session.activity,
                     session.last_seen,
-                    now_seconds()
+                    now_seconds(),
+                    session.repo
                 ],
             )?;
         }
@@ -1068,7 +1248,7 @@ impl Store {
     /// List synchronised sessions from other machines.
     pub fn list_remote_sessions(&self) -> Result<Vec<RemoteSession>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_key, peer_id, name, agent_type, status, activity, last_seen
+            "SELECT session_key, peer_id, name, agent_type, status, activity, last_seen, repo
              FROM remote_sessions ORDER BY name",
         )?;
         let sessions = stmt
@@ -1081,6 +1261,7 @@ impl Store {
                     status: row.get(4)?,
                     activity: row.get(5)?,
                     last_seen: row.get(6)?,
+                    repo: row.get(7)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1110,6 +1291,7 @@ impl Store {
         recipient_key: &str,
         body: &str,
         peer_id: &str,
+        reply_to: Option<&str>,
     ) -> Result<Message> {
         if body.trim().is_empty() {
             return Err(Error::InvalidRequest(
@@ -1124,8 +1306,12 @@ impl Store {
         if self.get_session(sender_key)?.is_none() {
             return Err(Error::NotFound(format!("sender session {sender_key}")));
         }
+        let (reply_to, thread_id) = self.thread_for(reply_to)?;
+        let id = new_id("msg");
         let message = Message {
-            id: new_id("msg"),
+            thread_id: Some(thread_id.unwrap_or_else(|| id.clone())),
+            reply_to,
+            id,
             sender_key: sender_key.to_string(),
             recipient_key: recipient_key.to_string(),
             body: body.to_string(),
@@ -1136,8 +1322,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO messages
                  (id, sender_key, recipient_key, body, created_at, state, delivered,
-                  origin, peer_id, remote_id, delivery_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 'local', ?7, NULL, 'pending')",
+                  origin, peer_id, remote_id, delivery_state, reply_to, thread_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 'local', ?7, NULL, 'pending', ?8, ?9)",
             params![
                 message.id,
                 message.sender_key,
@@ -1145,7 +1331,9 @@ impl Store {
                 message.body,
                 message.created_at,
                 message.state,
-                peer_id
+                peer_id,
+                message.reply_to,
+                message.thread_id
             ],
         )?;
         Ok(message)
@@ -1154,7 +1342,7 @@ impl Store {
     /// Outgoing messages that still need to reach a peer.
     pub fn pending_outbound(&self) -> Result<Vec<OutboundMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, sender_key, recipient_key, body, created_at, peer_id
+            "SELECT id, sender_key, recipient_key, body, created_at, peer_id, reply_to, thread_id
              FROM messages
              WHERE delivery_state IN ('pending', 'sent') AND peer_id IS NOT NULL
              ORDER BY created_at ASC",
@@ -1168,6 +1356,8 @@ impl Store {
                     body: row.get(3)?,
                     created_at: row.get(4)?,
                     peer_id: row.get(5)?,
+                    reply_to: row.get(6)?,
+                    thread_id: row.get(7)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1206,8 +1396,11 @@ impl Store {
 
     /// Store a message received from another machine.
     ///
+    /// The argument list mirrors the wire frame one to one.
+    ///
     /// Returns `Ok(None)` when the message was already stored, which is what
     /// makes retries safe: the receiver deduplicates on `(peer, remote_id)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_incoming_remote(
         &mut self,
         peer_id: &str,
@@ -1216,7 +1409,14 @@ impl Store {
         recipient_key: &str,
         body: &str,
         created_at: i64,
+        reply_to: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<Option<Message>> {
+        if sender_key.trim().eq_ignore_ascii_case(HUMAN_SENDER) {
+            return Err(Error::InvalidRequest(format!(
+                "a peer may not send as `{HUMAN_SENDER}`: that sender is reserved for the local human operator"
+            )));
+        }
         if body.len() > MAX_BODY_BYTES {
             return Err(Error::InvalidRequest(
                 "message exceeds the size limit".into(),
@@ -1227,20 +1427,41 @@ impl Store {
                 "recipient session {recipient_key}"
             )));
         }
+        // The sender's id is kept, so a reply can reference the original id on
+        // either machine.
+        // A colliding id (a different peer reusing an id) gets a fresh one.
+        let taken: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE id = ?1",
+                params![remote_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        let local_id = if taken && !self.has_remote(peer_id, remote_id)? {
+            new_id("msg")
+        } else {
+            remote_id.to_string()
+        };
         let message = Message {
-            id: new_id("msg"),
+            id: local_id,
             sender_key: sender_key.to_string(),
             recipient_key: recipient_key.to_string(),
             body: body.to_string(),
             created_at,
             state: "unread".to_string(),
             delivered: false,
+            reply_to: reply_to.map(str::to_string),
+            thread_id: thread_id
+                .map(str::to_string)
+                .or_else(|| Some(remote_id.to_string())),
         };
         let inserted = self.conn.execute(
             "INSERT OR IGNORE INTO messages
                  (id, sender_key, recipient_key, body, created_at, state, delivered,
-                  origin, peer_id, remote_id, delivery_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 'remote', ?7, ?8, 'local')",
+                  origin, peer_id, remote_id, delivery_state, reply_to, thread_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 'remote', ?7, ?8, 'local', ?9, ?10)",
             params![
                 message.id,
                 message.sender_key,
@@ -1249,13 +1470,29 @@ impl Store {
                 message.created_at,
                 message.state,
                 peer_id,
-                remote_id
+                remote_id,
+                message.reply_to,
+                message.thread_id
             ],
         )?;
         if inserted == 0 {
             return Ok(None);
         }
+        self.bump();
         Ok(Some(message))
+    }
+
+    /// True when a message from peer_id with this remote id is already stored.
+    fn has_remote(&self, peer_id: &str, remote_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM messages WHERE peer_id = ?1 AND remote_id = ?2",
+                params![peer_id, remote_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// Sessions that must be advertised to peers.
@@ -1271,8 +1508,488 @@ impl Store {
                 status: session.status,
                 activity: session.activity,
                 last_seen: session.last_seen,
+                repo: session.repo,
             })
             .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Milestone 4: search, conversations, file-overlap activity
+    // -----------------------------------------------------------------------
+
+    /// Search stored messages by a case-insensitive substring of the body.
+    ///
+    /// Reuses the existing `messages` table; no separate search database is
+    /// introduced. When `session_key` is set, only messages that session sent
+    /// or received are returned. Newest first.
+    pub fn search_messages(
+        &self,
+        query: &str,
+        session_key: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Message>> {
+        let needle = query.trim();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Escape LIKE wildcards so a literal substring is matched.
+        let escaped = needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let limit = limit.clamp(1, 500) as i64;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id
+             FROM messages
+             WHERE body LIKE ?1 ESCAPE '\\'
+               AND (?2 IS NULL OR sender_key = ?2 OR recipient_key = ?2)
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3",
+        )?;
+        let messages = stmt
+            .query_map(params![pattern, session_key, limit], row_to_message)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    /// The full conversation between two sessions, oldest first.
+    ///
+    /// Includes messages in both directions so the dashboard can render a
+    /// single thread.
+    pub fn conversation(&self, a: &str, b: &str, limit: u32) -> Result<Vec<Message>> {
+        let limit = limit.clamp(1, 1000) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id
+             FROM messages
+             WHERE (sender_key = ?1 AND recipient_key = ?2)
+                OR (sender_key = ?2 AND recipient_key = ?1)
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?3",
+        )?;
+        let messages = stmt
+            .query_map(params![a, b, limit], row_to_message)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    /// Every distinct session key this session has exchanged messages with,
+    /// with the newest message and unread count per peer. Used to list
+    /// conversation threads in the dashboard.
+    pub fn conversation_partners(&self, session_key: &str) -> Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT partner,
+                    MAX(created_at)        AS last_at,
+                    SUM(CASE WHEN recipient_key = ?1 AND state = 'unread' THEN 1 ELSE 0 END) AS unread
+             FROM (
+                 SELECT CASE WHEN sender_key = ?1 THEN recipient_key ELSE sender_key END AS partner,
+                        created_at, recipient_key, state
+                 FROM messages
+                 WHERE sender_key = ?1 OR recipient_key = ?1
+             )
+             GROUP BY partner
+             ORDER BY last_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![session_key], |row| {
+                Ok(serde_json::json!({
+                    "partner": row.get::<_, String>(0)?,
+                    "last_at": row.get::<_, i64>(1)?,
+                    "unread": row.get::<_, i64>(2)?,
+                }))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// A message from the human operator to a session on this machine.
+    ///
+    /// Only the local dashboard and IPC reach this. Agents cannot: the MCP
+    /// server has no such tool, and `human` cannot be registered as a session.
+    pub fn send_as_human(
+        &mut self,
+        recipient: &str,
+        body: &str,
+        reply_to: Option<&str>,
+    ) -> Result<Message> {
+        let recipient = recipient.trim();
+        if body.trim().is_empty() {
+            return Err(Error::InvalidRequest(
+                "message body must not be empty".into(),
+            ));
+        }
+        if body.len() > MAX_BODY_BYTES {
+            return Err(Error::InvalidRequest(format!(
+                "message body exceeds {MAX_BODY_BYTES} bytes"
+            )));
+        }
+        if self.get_session(recipient)?.is_none() {
+            return Err(Error::NotFound(format!(
+                "recipient session {recipient} (the human can only message sessions on this machine)"
+            )));
+        }
+        let (reply_to, thread_id) = self.thread_for(reply_to)?;
+        let id = new_id("msg");
+        let message = Message {
+            thread_id: Some(thread_id.unwrap_or_else(|| id.clone())),
+            reply_to,
+            id,
+            sender_key: HUMAN_SENDER.to_string(),
+            recipient_key: recipient.to_string(),
+            body: body.to_string(),
+            created_at: now_seconds(),
+            state: "unread".to_string(),
+            delivered: false,
+        };
+        self.conn.execute(
+            "INSERT INTO messages
+                 (id, sender_key, recipient_key, body, created_at, state, delivered, reply_to, thread_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
+            params![
+                message.id,
+                message.sender_key,
+                message.recipient_key,
+                message.body,
+                message.created_at,
+                message.state,
+                message.reply_to,
+                message.thread_id,
+            ],
+        )?;
+        self.bump();
+        Ok(message)
+    }
+
+    /// Every pair of participants that exchanged messages, newest first, with
+    /// the last message, a count and the unread count.
+    pub fn conversation_pairs(&self, limit: u32) -> Result<Vec<serde_json::Value>> {
+        let limit = limit.clamp(1, 500) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT a, b, MAX(created_at) AS last_at, COUNT(*) AS total,
+                    SUM(CASE WHEN state = 'unread' THEN 1 ELSE 0 END) AS unread
+             FROM (
+                 SELECT CASE WHEN sender_key < recipient_key THEN sender_key ELSE recipient_key END AS a,
+                        CASE WHEN sender_key < recipient_key THEN recipient_key ELSE sender_key END AS b,
+                        created_at, state
+                 FROM messages
+             )
+             GROUP BY a, b
+             ORDER BY last_at DESC
+             LIMIT ?1",
+        )?;
+        let pairs = stmt
+            .query_map(params![limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for (a, b, last_at, total, unread) in pairs {
+            let last: Option<(String, String)> = self
+                .conn
+                .query_row(
+                    "SELECT sender_key, body FROM messages
+                     WHERE (sender_key = ?1 AND recipient_key = ?2)
+                        OR (sender_key = ?2 AND recipient_key = ?1)
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                    params![a, b],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (last_sender, last_body) = last.unwrap_or_default();
+            out.push(serde_json::json!({
+                "a": a, "b": b, "last_at": last_at, "total": total, "unread": unread,
+                "last_sender": last_sender,
+                "last_body": snippet(&last_body, 140),
+            }));
+        }
+        Ok(out)
+    }
+
+    /// A conversation with a derived delivery state per message.
+    ///
+    /// `delivery` is one of `queued` (waiting for a peer machine), `sent`
+    /// (handed to the peer), `delivered` (stored in the recipient's inbox) or
+    /// `read` (the recipient consumed it).
+    pub fn conversation_view(
+        &self,
+        a: &str,
+        b: &str,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let limit = limit.clamp(1, 1000) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sender_key, recipient_key, body, created_at, state, reply_to, thread_id,
+                    delivery_state, origin
+             FROM messages
+             WHERE (sender_key = ?1 AND recipient_key = ?2)
+                OR (sender_key = ?2 AND recipient_key = ?1)
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![a, b, limit], |row| {
+                let state: String = row.get(5)?;
+                let delivery_state: String = row.get(8)?;
+                let origin: String = row.get(9)?;
+                let delivery = match (origin.as_str(), delivery_state.as_str()) {
+                    ("local", "pending") => "queued",
+                    ("local", "sent") => "sent",
+                    ("local", "acked") => "delivered",
+                    _ if state == "read" => "read",
+                    _ => "delivered",
+                };
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "sender_key": row.get::<_, String>(1)?,
+                    "recipient_key": row.get::<_, String>(2)?,
+                    "body": row.get::<_, String>(3)?,
+                    "created_at": row.get::<_, i64>(4)?,
+                    "state": state,
+                    "reply_to": row.get::<_, Option<String>>(6)?,
+                    "thread_id": row.get::<_, Option<String>>(7)?,
+                    "delivery": delivery,
+                    "from_human": row.get::<_, String>(1)? == HUMAN_SENDER,
+                }))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Search with filters and surrounding context.
+    ///
+    /// `sender` is `human` or `agent` to restrict who wrote the message;
+    /// `since` is a unix time lower bound. Every hit carries the message
+    /// before and after it in the same conversation.
+    pub fn search_view(
+        &self,
+        query: &str,
+        session_key: Option<&str>,
+        sender: Option<&str>,
+        since: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let needle = query.trim();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let limit = limit.clamp(1, 200) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sender_key, recipient_key, body, created_at, state
+             FROM messages
+             WHERE body LIKE ?1 ESCAPE '\\'
+               AND (?2 IS NULL OR sender_key = ?2 OR recipient_key = ?2)
+               AND (?3 IS NULL OR (?3 = 'human' AND sender_key = 'human')
+                               OR (?3 = 'agent' AND sender_key <> 'human'))
+               AND (?4 IS NULL OR created_at >= ?4)
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?5",
+        )?;
+        let hits = stmt
+            .query_map(params![pattern, session_key, sender, since, limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let neighbour = |sender: &str, recipient: &str, at: i64, id: &str, before: bool| {
+            let sql = if before {
+                "SELECT sender_key, body, created_at FROM messages
+                 WHERE ((sender_key = ?1 AND recipient_key = ?2) OR (sender_key = ?2 AND recipient_key = ?1))
+                   AND (created_at < ?3 OR (created_at = ?3 AND id < ?4))
+                 ORDER BY created_at DESC, id DESC LIMIT 1"
+            } else {
+                "SELECT sender_key, body, created_at FROM messages
+                 WHERE ((sender_key = ?1 AND recipient_key = ?2) OR (sender_key = ?2 AND recipient_key = ?1))
+                   AND (created_at > ?3 OR (created_at = ?3 AND id > ?4))
+                 ORDER BY created_at ASC, id ASC LIMIT 1"
+            };
+            self.conn
+                .query_row(sql, params![sender, recipient, at, id], |row| {
+                    Ok(serde_json::json!({
+                        "sender_key": row.get::<_, String>(0)?,
+                        "body": snippet(&row.get::<_, String>(1)?, 160),
+                        "created_at": row.get::<_, i64>(2)?,
+                    }))
+                })
+                .optional()
+        };
+        let mut out = Vec::new();
+        for (id, sender, recipient, body, created_at, state) in hits {
+            out.push(serde_json::json!({
+                "id": id,
+                "sender_key": sender,
+                "recipient_key": recipient,
+                "body": body,
+                "created_at": created_at,
+                "state": state,
+                "from_human": sender == HUMAN_SENDER,
+                "before": neighbour(&sender, &recipient, created_at, &id, true)?,
+                "after": neighbour(&sender, &recipient, created_at, &id, false)?,
+            }));
+        }
+        Ok(out)
+    }
+
+    /// Questions with the context an approver needs and whether the answer
+    /// reached the asking agent.
+    pub fn question_view(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>> {
+        let mut out = Vec::new();
+        for question in self.list_questions(status)? {
+            // What the asking session was dealing with just before it asked.
+            let mut stmt = self.conn.prepare(
+                "SELECT sender_key, recipient_key, body, created_at FROM messages
+                 WHERE (sender_key = ?1 OR recipient_key = ?1) AND created_at <= ?2
+                 ORDER BY created_at DESC, id DESC LIMIT 3",
+            )?;
+            let mut context = stmt
+                .query_map(params![question.session_key, question.created_at], |row| {
+                    Ok(serde_json::json!({
+                        "sender_key": row.get::<_, String>(0)?,
+                        "recipient_key": row.get::<_, String>(1)?,
+                        "body": snippet(&row.get::<_, String>(2)?, 240),
+                        "created_at": row.get::<_, i64>(3)?,
+                    }))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            context.reverse();
+            // Did the agent pick the answer up?
+            let answer_state: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT state FROM messages WHERE reply_to = ?1 AND sender_key = 'human'
+                     ORDER BY created_at DESC LIMIT 1",
+                    params![question.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let session = self.get_session(&question.session_key)?;
+            let mut value = serde_json::to_value(&question)?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("context".into(), serde_json::Value::Array(context));
+                object.insert(
+                    "delivery".into(),
+                    serde_json::json!(match answer_state.as_deref() {
+                        Some("read") => "read by the agent",
+                        Some(_) => "delivered, waiting for the agent",
+                        None => "",
+                    }),
+                );
+                object.insert(
+                    "session".into(),
+                    session
+                        .map(|s| {
+                            serde_json::json!({
+                                "name": s.name, "agent_type": s.agent_type, "repo": s.repo,
+                                "working_dir": s.working_dir, "status": s.status,
+                            })
+                        })
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            out.push(value);
+        }
+        Ok(out)
+    }
+    /// Record (or refresh) a file a session is working on.
+    pub fn record_file_activity(&mut self, activity: &FileActivity) -> Result<()> {
+        let path = activity.path.trim();
+        if path.is_empty() {
+            return Err(Error::InvalidRequest("file path must not be empty".into()));
+        }
+        self.conn.execute(
+            "INSERT INTO file_activity (session_key, repo, path, action, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(session_key, path) DO UPDATE SET
+                 repo       = COALESCE(excluded.repo, file_activity.repo),
+                 action     = excluded.action,
+                 updated_at = excluded.updated_at",
+            params![
+                activity.session_key,
+                activity.repo,
+                path,
+                activity.action,
+                activity.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a session's file activity (e.g. when it goes offline).
+    pub fn clear_file_activity(&mut self, session_key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM file_activity WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        Ok(())
+    }
+
+    /// Detect files touched by two or more sessions within `window_seconds`.
+    ///
+    /// Only files edited (not merely read) are considered an overlap worth a
+    /// warning. Sessions are compared within the same repository; a `NULL`
+    /// repository only overlaps another `NULL` repository.
+    pub fn file_overlaps(&self, window_seconds: i64) -> Result<Vec<FileOverlap>> {
+        let cutoff = now_seconds() - window_seconds.max(0);
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(repo, '') AS r, path, session_key, updated_at
+             FROM file_activity
+             WHERE action IN ('edit', 'write') AND updated_at >= ?1
+             ORDER BY r, path, updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut overlaps: Vec<FileOverlap> = Vec::new();
+        let mut index = 0;
+        while index < rows.len() {
+            let (repo, path, _, _) = &rows[index];
+            let mut sessions = Vec::new();
+            let mut last_activity = 0;
+            let mut end = index;
+            while end < rows.len() && &rows[end].0 == repo && &rows[end].1 == path {
+                if !sessions.contains(&rows[end].2) {
+                    sessions.push(rows[end].2.clone());
+                }
+                last_activity = last_activity.max(rows[end].3);
+                end += 1;
+            }
+            if sessions.len() >= 2 {
+                overlaps.push(FileOverlap {
+                    repo: repo.clone(),
+                    path: path.clone(),
+                    sessions,
+                    last_activity,
+                });
+            }
+            index = end;
+        }
+        overlaps.sort_by_key(|overlap| std::cmp::Reverse(overlap.last_activity));
+        Ok(overlaps)
     }
 
     /// Read a value from the local metadata table.
@@ -1344,6 +2061,8 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         created_at: row.get(4)?,
         state: row.get(5)?,
         delivered: delivered != 0,
+        reply_to: row.get(7)?,
+        thread_id: row.get(8)?,
     })
 }
 
@@ -1366,6 +2085,17 @@ fn row_to_question(row: &rusqlite::Row<'_>) -> rusqlite::Result<Question> {
         created_at: row.get(5)?,
         answered_at: row.get(6)?,
     })
+}
+
+/// Shorten text to max characters for list views.
+fn snippet(text: &str, max: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        let cut: String = flat.chars().take(max).collect();
+        format!("{cut}…")
+    }
 }
 
 /// Current unix timestamp in seconds.
@@ -1430,6 +2160,7 @@ mod tests {
         register(&mut store, "a", "a");
         let err = store
             .send_message(SendMessageParams {
+                reply_to: None,
                 sender_key: "a".into(),
                 recipient_key: "ghost".into(),
                 body: "hi".into(),
@@ -1445,6 +2176,7 @@ mod tests {
         register(&mut store, "b", "b");
         store
             .send_message(SendMessageParams {
+                reply_to: None,
                 sender_key: "a".into(),
                 recipient_key: "b".into(),
                 body: "hello".into(),
@@ -1479,12 +2211,12 @@ mod tests {
         register(&mut store, "bob", "bob");
 
         let first = store
-            .store_incoming_remote("peer-1", "remote-1", "alice", "bob", "hi", 10)
+            .store_incoming_remote("peer-1", "remote-1", "alice", "bob", "hi", 10, None, None)
             .unwrap();
         assert!(first.is_some());
 
         let again = store
-            .store_incoming_remote("peer-1", "remote-1", "alice", "bob", "hi", 10)
+            .store_incoming_remote("peer-1", "remote-1", "alice", "bob", "hi", 10, None, None)
             .unwrap();
         assert!(again.is_none(), "a retried message must be dropped");
 
@@ -1504,13 +2236,13 @@ mod tests {
         register(&mut store, "bob", "bob");
         assert!(
             store
-                .store_incoming_remote("peer-1", "1", "a", "bob", "one", 10)
+                .store_incoming_remote("peer-1", "1", "a", "bob", "one", 10, None, None)
                 .unwrap()
                 .is_some()
         );
         assert!(
             store
-                .store_incoming_remote("peer-2", "1", "b", "bob", "two", 10)
+                .store_incoming_remote("peer-2", "1", "b", "bob", "two", 10, None, None)
                 .unwrap()
                 .is_some()
         );
@@ -1521,7 +2253,7 @@ mod tests {
     fn an_unknown_remote_recipient_is_rejected() {
         let mut store = Store::open_in_memory().unwrap();
         let error = store
-            .store_incoming_remote("peer-1", "1", "a", "nobody", "hi", 10)
+            .store_incoming_remote("peer-1", "1", "a", "nobody", "hi", 10, None, None)
             .unwrap_err();
         assert!(matches!(error, Error::NotFound(_)));
     }
@@ -1531,7 +2263,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         register(&mut store, "alice", "alice");
         let message = store
-            .queue_remote_message("alice", "bob-agent", "hello", "peer-2")
+            .queue_remote_message("alice", "bob-agent", "hello", "peer-2", None)
             .unwrap();
         assert_eq!(store.pending_outbound().unwrap().len(), 1);
 
@@ -1546,6 +2278,7 @@ mod tests {
     fn remote_sessions_are_replaced_per_peer() {
         let mut store = Store::open_in_memory().unwrap();
         let session = |key: &str, peer: &str| RemoteSession {
+            repo: None,
             session_key: key.into(),
             peer_id: peer.into(),
             name: key.into(),
@@ -1637,6 +2370,138 @@ mod tests {
             })
             .unwrap();
         assert_eq!(store.all_revocations().unwrap().len(), 1);
+    }
+
+    // ---- Milestone 4 -----------------------------------------------------
+
+    fn send(store: &mut Store, from: &str, to: &str, body: &str) {
+        store
+            .send_message(SendMessageParams {
+                reply_to: None,
+                sender_key: from.into(),
+                recipient_key: to.into(),
+                body: body.into(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn search_matches_body_substring_case_insensitively() {
+        let mut store = Store::open_in_memory().unwrap();
+        register(&mut store, "a", "a");
+        register(&mut store, "b", "b");
+        send(&mut store, "a", "b", "Please review the Storage layer");
+        send(&mut store, "b", "a", "done with tests");
+
+        let hits = store.search_messages("storage", None, 50).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].body.contains("Storage"));
+
+        // Scoped to a session that is not involved -> nothing.
+        register(&mut store, "c", "c");
+        assert!(
+            store
+                .search_messages("storage", Some("c"), 50)
+                .unwrap()
+                .is_empty()
+        );
+        // Scoped to an involved session -> found.
+        assert_eq!(
+            store
+                .search_messages("storage", Some("a"), 50)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn search_treats_wildcards_as_literal() {
+        let mut store = Store::open_in_memory().unwrap();
+        register(&mut store, "a", "a");
+        register(&mut store, "b", "b");
+        send(&mut store, "a", "b", "100% done");
+        send(&mut store, "a", "b", "nothing here");
+
+        // A bare `%` must not match every row.
+        let hits = store.search_messages("100%", None, 50).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(store.search_messages("", None, 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn conversation_returns_both_directions_in_order() {
+        let mut store = Store::open_in_memory().unwrap();
+        register(&mut store, "a", "a");
+        register(&mut store, "b", "b");
+        register(&mut store, "c", "c");
+        send(&mut store, "a", "b", "one");
+        send(&mut store, "b", "a", "two");
+        send(&mut store, "a", "c", "unrelated");
+
+        let thread = store.conversation("a", "b", 50).unwrap();
+        assert_eq!(thread.len(), 2);
+        assert_eq!(thread[0].body, "one");
+        assert_eq!(thread[1].body, "two");
+
+        let partners = store.conversation_partners("a").unwrap();
+        assert_eq!(partners.len(), 2);
+    }
+
+    #[test]
+    fn file_overlap_is_detected_only_for_concurrent_edits() {
+        let mut store = Store::open_in_memory().unwrap();
+        let now = now_seconds();
+        let touch = |store: &mut Store, session: &str, path: &str, action: &str| {
+            store
+                .record_file_activity(&FileActivity {
+                    session_key: session.into(),
+                    repo: Some("app".into()),
+                    path: path.into(),
+                    action: action.into(),
+                    updated_at: now,
+                })
+                .unwrap();
+        };
+
+        // Two sessions editing the same file -> overlap.
+        touch(&mut store, "alice", "src/main.rs", "edit");
+        touch(&mut store, "bob", "src/main.rs", "edit");
+        // A file only one session edits -> no overlap.
+        touch(&mut store, "alice", "src/lib.rs", "edit");
+        // A read by a third session does not count as an overlapping edit.
+        touch(&mut store, "carol", "src/util.rs", "read");
+        touch(&mut store, "dave", "src/util.rs", "edit");
+
+        let overlaps = store.file_overlaps(3600).unwrap();
+        assert_eq!(overlaps.len(), 1, "only the shared edit overlaps");
+        assert_eq!(overlaps[0].path, "src/main.rs");
+        assert_eq!(overlaps[0].sessions.len(), 2);
+
+        // Clearing one session removes the overlap.
+        store.clear_file_activity("bob").unwrap();
+        assert!(store.file_overlaps(3600).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_overlap_respects_the_time_window() {
+        let mut store = Store::open_in_memory().unwrap();
+        let old = now_seconds() - 10_000;
+        for session in ["alice", "bob"] {
+            store
+                .record_file_activity(&FileActivity {
+                    session_key: session.into(),
+                    repo: Some("app".into()),
+                    path: "src/main.rs".into(),
+                    action: "edit".into(),
+                    updated_at: old,
+                })
+                .unwrap();
+        }
+        // The edits are outside a 60s window.
+        assert!(store.file_overlaps(60).unwrap().is_empty());
+        // But visible in a wide window.
+        assert_eq!(store.file_overlaps(100_000).unwrap().len(), 1);
     }
 
     #[test]

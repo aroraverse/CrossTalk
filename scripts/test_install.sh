@@ -37,7 +37,7 @@ make_release() {
         cat >"$fake" <<EOF
 #!/bin/sh
 case "\${1:-}" in
-    --version) echo "reason-network ${version}" ;;
+    --version) echo "crosstalk ${version}" ;;
     service) echo "fake service \$2"; echo "service \$2" >>"\${HOME}/service.log" ;;
 esac
 EOF
@@ -49,16 +49,16 @@ EOF
 }
 
 export HOME="${WORK}/home"
-export REASON_NETWORK_DATA_DIR="${WORK}/data"
-mkdir -p "$HOME" "$REASON_NETWORK_DATA_DIR"
-echo "precious" >"${REASON_NETWORK_DATA_DIR}/reason-network.db"
+export CROSSTALK_DATA_DIR="${WORK}/data"
+mkdir -p "$HOME" "$CROSSTALK_DATA_DIR"
+echo "precious" >"${CROSSTALK_DATA_DIR}/crosstalk.db"
 echo '{"mcpServers":{"other":{}}}' >"${HOME}/.claude.json"
 DEST="${WORK}/bin"
 
 run() { sh "$INSTALLER" --target "$TARGET" --install-dir "$DEST" "$@"; }
 
 data_intact() {
-    [ "$(cat "${REASON_NETWORK_DATA_DIR}/reason-network.db")" = "precious" ] || fail "data was modified"
+    [ "$(cat "${CROSSTALK_DATA_DIR}/crosstalk.db")" = "precious" ] || fail "data was modified"
     [ "$(cat "${HOME}/.claude.json")" = '{"mcpServers":{"other":{}}}' ] || fail "configuration was modified"
 }
 
@@ -66,7 +66,7 @@ make_release "${WORK}/rel" 0.1.0 0.2.0
 
 # Fresh install picks the newest version.
 out="$(run --from-dir "${WORK}/rel")"
-[ "$("${DEST}/reason-network" --version)" = "reason-network 0.2.0" ] || fail "latest not installed: $out"
+[ "$("${DEST}/crosstalk" --version)" = "crosstalk 0.2.0" ] || fail "latest not installed: $out"
 echo "$out" | grep -q "verified SHA-256" || fail "no verification message"
 echo "$out" | grep -q "is not on your PATH" || fail "no PATH hint"
 data_intact
@@ -75,15 +75,15 @@ pass "fresh install selects the latest version and explains PATH"
 # Running again is safe.
 run --from-dir "${WORK}/rel" >/dev/null
 run --from-dir "${WORK}/rel" >/dev/null
-[ "$("${DEST}/reason-network" --version)" = "reason-network 0.2.0" ] || fail "re-run broke the install"
-[ -z "$(find "$DEST" -name '.reason-network.new.*')" ] || fail "staged file left behind"
+[ "$("${DEST}/crosstalk" --version)" = "crosstalk 0.2.0" ] || fail "re-run broke the install"
+[ -z "$(find "$DEST" -name '.crosstalk.new.*')" ] || fail "staged file left behind"
 pass "repeated install is idempotent"
 
 # A specific version (downgrade), then an upgrade back.
 run --from-dir "${WORK}/rel" --version 0.1.0 >/dev/null
-[ "$("${DEST}/reason-network" --version)" = "reason-network 0.1.0" ] || fail "pinned version not installed"
+[ "$("${DEST}/crosstalk" --version)" = "crosstalk 0.1.0" ] || fail "pinned version not installed"
 out="$(run --from-dir "${WORK}/rel" --version v0.2.0)"
-echo "$out" | grep -q "upgraded reason-network 0.1.0 -> reason-network 0.2.0" || fail "no upgrade message: $out"
+echo "$out" | grep -q "upgraded crosstalk 0.1.0 -> crosstalk 0.2.0" || fail "no upgrade message: $out"
 data_intact
 pass "specific versions and upgrades preserve data and configuration"
 
@@ -94,11 +94,11 @@ pass "an unknown version is rejected"
 
 # Tampered package: rejected, existing install untouched.
 cp -R "${WORK}/rel" "${WORK}/tampered"
-printf 'x' >>"${WORK}/tampered/reason-network-0.1.0-${TARGET}.tar.gz"
-before="$("${DEST}/reason-network" --version)"
+printf 'x' >>"${WORK}/tampered/crosstalk-0.1.0-${TARGET}.tar.gz"
+before="$("${DEST}/crosstalk" --version)"
 if out="$(run --from-dir "${WORK}/tampered" --version 0.1.0 2>&1)"; then fail "tampered package accepted"; fi
 echo "$out" | grep -q "checksum mismatch" || fail "unclear error: $out"
-[ "$("${DEST}/reason-network" --version)" = "$before" ] || fail "install changed after a failed verification"
+[ "$("${DEST}/crosstalk" --version)" = "$before" ] || fail "install changed after a failed verification"
 pass "a tampered package is rejected without touching the install"
 
 # Missing dependency: no tar on PATH.
@@ -135,7 +135,7 @@ pass "unsupported platforms are rejected"
 
 # Uninstall keeps data, removes the service through the executable.
 out="$(run --uninstall)"
-[ ! -e "${DEST}/reason-network" ] || fail "executable not removed"
+[ ! -e "${DEST}/crosstalk" ] || fail "executable not removed"
 grep -q "service uninstall" "${HOME}/service.log" || fail "service not unregistered"
 echo "$out" | grep -q "data directory kept" || fail "no data message: $out"
 data_intact
@@ -146,7 +146,7 @@ pass "uninstall removes the executable and service but keeps data"
 # Purging requires the explicit flag.
 if run --purge-data --from-dir "${WORK}/rel" >/dev/null 2>&1; then fail "--purge-data accepted without --uninstall"; fi
 run --uninstall --purge-data >/dev/null
-[ ! -e "$REASON_NETWORK_DATA_DIR" ] || fail "data not purged"
+[ ! -e "$CROSSTALK_DATA_DIR" ] || fail "data not purged"
 [ -f "${HOME}/.claude.json" ] || fail "agent configuration removed"
 pass "--purge-data deletes only the data directory"
 

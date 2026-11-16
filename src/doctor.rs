@@ -1,4 +1,4 @@
-//! `reason-network doctor`: concise, actionable diagnostics (M2).
+//! `crosstalk doctor`: concise, actionable diagnostics (M2).
 //!
 //! Every check reports `ok`, `warn` or `fail` with a one-line detail and,
 //! when something needs doing, the command that fixes it. Doctor only reads:
@@ -110,7 +110,7 @@ async fn request(config: &Config, method: Method) -> Option<Value> {
 
 fn check_executable(host: &Host) -> Check {
     let detail = format!(
-        "reason-network {VERSION} ({}/{}) at {}",
+        "crosstalk {VERSION} ({}/{}) at {}",
         std::env::consts::OS,
         std::env::consts::ARCH,
         host.exe.display()
@@ -130,7 +130,7 @@ fn check_executable(host: &Host) -> Check {
             format!("{detail}; its directory is not on PATH"),
         )
         .fix(format!(
-            "add {} to PATH to run `reason-network` from any shell (agent configurations use the absolute path and work regardless)",
+            "add {} to PATH to run `crosstalk` from any shell (agent configurations use the absolute path and work regardless)",
             dir.map(|dir| dir.display().to_string()).unwrap_or_default()
         ))
     }
@@ -147,19 +147,19 @@ fn check_data_dir(config: &Config) -> Check {
             Level::Fail,
             format!("{} is read-only", dir.display()),
         )
-        .fix("make the directory writable, or set REASON_NETWORK_DATA_DIR to a writable one"),
+        .fix("make the directory writable, or set CROSSTALK_DATA_DIR to a writable one"),
         Ok(_) => Check::new(
             "data directory",
             Level::Fail,
             format!("{} exists but is not a directory", dir.display()),
         )
-        .fix("move the file away, or set REASON_NETWORK_DATA_DIR"),
+        .fix("move the file away, or set CROSSTALK_DATA_DIR"),
         Err(_) => Check::new(
             "data directory",
             Level::Warn,
             format!("{} does not exist yet", dir.display()),
         )
-        .fix("it is created when the daemon first starts: `reason-network service start` or `reason-network daemon-start`"),
+        .fix("it is created when the daemon first starts: `crosstalk service start` or `crosstalk daemon-start`"),
     }
 }
 
@@ -249,7 +249,7 @@ fn check_daemon(config: &Config, status: Option<&Value>) -> Check {
             Level::Fail,
             format!("not reachable on {}", config.endpoint.display()),
         )
-        .fix("start it: `reason-network service start` (after `service install`) or `reason-network daemon-start`"),
+        .fix("start it: `crosstalk service start` (after `service install`) or `crosstalk daemon-start`"),
     }
 }
 
@@ -258,7 +258,7 @@ fn check_network(config: &Config, net_info: Option<&Value>) -> Check {
         return Check::new(
             "network",
             Level::Ok,
-            "peer-to-peer networking disabled (REASON_NETWORK_NET=0); local messaging only",
+            "peer-to-peer networking disabled (CROSSTALK_NET=0); local messaging only",
         );
     }
     let Some(info) = net_info else {
@@ -293,7 +293,7 @@ fn check_network(config: &Config, net_info: Option<&Value>) -> Check {
             Level::Warn,
             format!("{detail}; no team peer is connected"),
         )
-        .fix("start the daemon on the other machines; `reason-network peer-list` shows their state")
+        .fix("start the daemon on the other machines; `crosstalk peer-list` shows their state")
     } else {
         Check::new("network", Level::Ok, detail)
     }
@@ -343,7 +343,7 @@ pub async fn agent_version(exe: &Path) -> Option<String> {
 
 fn check_agent_config(agent: Agent, host: &Host, installed: bool) -> Option<Check> {
     let name = format!("{} MCP config", agent.id());
-    let setup = format!("reason-network setup --agent {}", agent.id());
+    let setup = format!("crosstalk setup --agent {}", agent.id());
     let status = agents::inspect(agent, host);
     if let Some(error) = status.error {
         return Some(Check::new(name, Level::Fail, error));
@@ -353,7 +353,7 @@ fn check_agent_config(agent: Agent, host: &Host, installed: bool) -> Option<Chec
             return None;
         }
         let detail = if status.project_overrides.is_empty() {
-            "reason-network MCP server not configured".to_string()
+            "crosstalk MCP server not configured".to_string()
         } else {
             format!(
                 "not configured at user scope; only project-scoped entries exist, in: {}",
@@ -396,11 +396,11 @@ fn check_agent_config(agent: Agent, host: &Host, installed: bool) -> Option<Chec
                 name,
                 Level::Warn,
                 format!(
-                    "configured, but project-scoped `reason-network` entries override it in: {}",
+                    "configured, but project-scoped `crosstalk` entries override it in: {}",
                     status.project_overrides.join(", ")
                 ),
             )
-            .fix("remove the project entries with `claude mcp remove reason-network --scope local` in those directories if they are stale"),
+            .fix("remove the project entries with `claude mcp remove crosstalk --scope local` in those directories if they are stale"),
         );
     }
     if !status.up_to_date {
@@ -416,11 +416,19 @@ fn check_agent_config(agent: Agent, host: &Host, installed: bool) -> Option<Chec
     let note = match agent {
         Agent::Codex => "; trust the hooks once with `/hooks` inside codex",
         Agent::Claude => "",
+        Agent::Cursor => "; enable `crosstalk` under Cursor Settings → MCP",
+        Agent::Kiro => "; start `kiro-cli` from the project folder",
+        Agent::OpenCode => "; start `opencode` from the project folder",
+    };
+    let what = if agent.has_hooks() {
+        "MCP server and lifecycle hooks"
+    } else {
+        "MCP server (no hooks)"
     };
     Some(Check::new(
         name,
         Level::Ok,
-        format!("MCP server and lifecycle hooks configured ({files}){note}"),
+        format!("{what} configured ({files}){note}"),
     ))
 }
 
@@ -438,16 +446,13 @@ async fn check_service(config: &Config, spec: &ServiceSpec) -> Check {
             Level::Warn,
             format!("{what} installed, daemon not running"),
         )
-        .fix(format!(
-            "reason-network service start (log: {})",
-            status.log
-        )),
+        .fix(format!("crosstalk service start (log: {})", status.log)),
         (false, _) => Check::new(
             "service",
             Level::Ok,
             format!("{what} not installed (optional)"),
         )
-        .fix("reason-network service install && reason-network service start"),
+        .fix("crosstalk service install && crosstalk service start"),
     }
 }
 

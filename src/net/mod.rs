@@ -66,14 +66,14 @@ impl Default for NetOptions {
 impl NetOptions {
     /// Read the options from the environment.
     ///
-    /// `REASON_NETWORK_NET=0` disables networking entirely (M0 behaviour),
-    /// `REASON_NETWORK_RELAY=0` keeps traffic on direct connections only,
-    /// `REASON_NETWORK_DISCOVERY=0` disables LAN discovery.
+    /// `CROSSTALK_NET=0` disables networking entirely (M0 behaviour),
+    /// `CROSSTALK_RELAY=0` keeps traffic on direct connections only,
+    /// `CROSSTALK_DISCOVERY=0` disables LAN discovery.
     pub fn from_env() -> Self {
         Self {
-            enabled: env_flag("REASON_NETWORK_NET", true),
-            relay: env_flag("REASON_NETWORK_RELAY", true),
-            discovery: env_flag("REASON_NETWORK_DISCOVERY", true),
+            enabled: env_flag("CROSSTALK_NET", true),
+            relay: env_flag("CROSSTALK_RELAY", true),
+            discovery: env_flag("CROSSTALK_DISCOVERY", true),
         }
     }
 
@@ -298,6 +298,7 @@ impl Network {
                     status: session.status,
                     activity: session.activity,
                     last_seen: session.last_seen,
+                    repo: session.repo,
                 })
                 .collect(),
         }));
@@ -1189,6 +1190,7 @@ impl Network {
                         status: session.status.clone(),
                         activity: session.activity.clone(),
                         last_seen: session.last_seen,
+                        repo: session.repo.clone(),
                     })
                     .collect();
                 self.with_store(|store| store.replace_remote_sessions(peer_id, &sessions))?;
@@ -1243,6 +1245,8 @@ impl Network {
                         &message.recipient_session,
                         &message.body,
                         message.created_at,
+                        message.reply_to.as_deref(),
+                        message.thread_id.as_deref(),
                     )
                 });
 

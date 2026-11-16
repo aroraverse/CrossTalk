@@ -1,4 +1,4 @@
-//! `reason-network setup` against isolated configuration fixtures.
+//! `crosstalk setup` against isolated configuration fixtures.
 //!
 //! Every test builds a fake home directory with pre-existing agent
 //! configuration and fake agent executables. The real user configuration is
@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use reason_network::agents::{self, Agent, Host, Outcome};
+use crosstalk::agents::{self, Agent, Host, Outcome};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -58,6 +58,189 @@ type = "command"
 command = "echo user-stop"
 "#;
 
+const CURSOR_MCP: &str = r#"{
+  "mcpServers": {
+    "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] }
+  }
+}
+"#;
+
+const OPENCODE_JSON: &str = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-sessions-all"],
+  "permission": { "*": "ask" },
+  "mcp": { "servers": { "context7": { "type": "remote", "url": "https://mcp.context7.com/mcp" } } }
+}
+"#;
+
+#[test]
+fn kiro_setup_adds_the_mcp_server_and_preserves_other_servers() {
+    let fixture = Fixture::new();
+    setup(&fixture, &[Agent::Kiro]).into_result().unwrap();
+    assert!(
+        fixture
+            .host
+            .kiro_mcp()
+            .ends_with(Path::new(".kiro").join("settings").join("mcp.json"))
+    );
+    let mcp = fixture.json(&fixture.host.kiro_mcp());
+    assert_eq!(
+        mcp["mcpServers"]["github"]["command"], "npx",
+        "other servers kept"
+    );
+    let ours = &mcp["mcpServers"]["crosstalk"];
+    assert_eq!(ours["command"], fixture.host.exe.display().to_string());
+    assert_eq!(ours["args"], serde_json::json!(["mcp", "--agent", "kiro"]));
+    assert_eq!(ours["disabled"], false);
+    let second = setup(&fixture, &[Agent::Kiro]);
+    for (_, outcome) in &second.entries {
+        let Outcome::Applied(plan, _) = outcome else {
+            panic!("expected applied, got {outcome:?}");
+        };
+        assert!(plan.is_noop(), "{plan:?}");
+    }
+}
+
+#[test]
+fn opencode_setup_adds_a_local_server_and_preserves_the_config() {
+    let fixture = Fixture::new();
+    setup(&fixture, &[Agent::OpenCode]).into_result().unwrap();
+    let config = fixture.json(&fixture.host.opencode_config());
+    assert_eq!(config["$schema"], "https://opencode.ai/config.json");
+    assert_eq!(
+        config["plugin"][0], "opencode-sessions-all",
+        "other keys kept"
+    );
+    assert_eq!(config["permission"]["*"], "ask");
+    assert_eq!(
+        config["mcp"]["servers"]["context7"]["type"], "remote",
+        "other servers kept"
+    );
+    let ours = &config["mcp"]["servers"]["crosstalk"];
+    assert_eq!(ours["type"], "local");
+    assert_eq!(
+        ours["command"],
+        serde_json::json!([
+            fixture.host.exe.display().to_string(),
+            "mcp",
+            "--agent",
+            "opencode"
+        ])
+    );
+    let second = setup(&fixture, &[Agent::OpenCode]);
+    for (_, outcome) in &second.entries {
+        let Outcome::Applied(plan, _) = outcome else {
+            panic!("expected applied, got {outcome:?}");
+        };
+        assert!(plan.is_noop(), "{plan:?}");
+    }
+}
+
+#[test]
+fn opencode_jsonc_with_comments_is_reported_and_left_alone() {
+    let fixture = Fixture::empty(&[Agent::OpenCode]);
+    let jsonc = fixture
+        .host
+        .home
+        .join(".config")
+        .join("opencode")
+        .join("opencode.jsonc");
+    fixture.write(&jsonc, "{\n  // my settings\n  \"theme\": \"dark\"\n}\n");
+    assert_eq!(
+        fixture.host.opencode_config(),
+        jsonc,
+        "an existing .jsonc is the config file"
+    );
+    let before = fixture.snapshot();
+    let report = setup(&fixture, &[Agent::OpenCode]);
+    let Outcome::Failed(reason) = &report.entries[0].1 else {
+        panic!("expected failure, got {:?}", report.entries[0].1);
+    };
+    assert!(reason.contains("nothing was changed"), "{reason}");
+    assert_eq!(before, fixture.snapshot(), "comments are never destroyed");
+}
+
+#[test]
+fn opencode_setup_warns_when_a_plugin_imports_claude_mcp_servers() {
+    let fixture = Fixture::empty(&[Agent::OpenCode]);
+    fixture.write(
+        &fixture.host.opencode_config(),
+        r#"{ "plugin": ["oh-my-openagent@latest"] }"#,
+    );
+    let report = setup(&fixture, &[Agent::OpenCode]);
+    let rendered = report.render();
+    assert!(rendered.contains("claude_code"), "{rendered}");
+
+    // Once the user turned the import off, there is nothing to warn about.
+    let fixed = Fixture::empty(&[Agent::OpenCode]);
+    fixed.write(
+        &fixed.host.opencode_config(),
+        r#"{ "plugin": ["oh-my-openagent@latest"] }"#,
+    );
+    fixed.write(
+        &fixed
+            .host
+            .home
+            .join(".config")
+            .join("opencode")
+            .join("oh-my-openagent.json"),
+        r#"{ "claude_code": { "mcp": false } }"#,
+    );
+    let rendered = setup(&fixed, &[Agent::OpenCode]).render();
+    assert!(!rendered.contains("claude_code"), "{rendered}");
+}
+
+#[test]
+fn cursor_setup_adds_the_mcp_server_and_preserves_other_servers() {
+    let fixture = Fixture::new();
+    setup(&fixture, &[Agent::Cursor]).into_result().unwrap();
+
+    let mcp = fixture.json(&fixture.host.cursor_mcp());
+    assert_eq!(
+        mcp["mcpServers"]["github"]["command"], "npx",
+        "other servers kept"
+    );
+    let ours = &mcp["mcpServers"]["crosstalk"];
+    assert_eq!(ours["type"], "stdio");
+    assert_eq!(ours["command"], fixture.host.exe.display().to_string());
+    assert_eq!(
+        ours["args"],
+        serde_json::json!(["mcp", "--agent", "cursor"])
+    );
+    assert_eq!(
+        ours["env"]["CROSSTALK_WORKSPACE"], "${workspaceFolder}",
+        "the MCP server learns the project from Cursor's interpolation"
+    );
+    assert_eq!(fixture.backups().len(), 1, "mcp.json backed up");
+    assert!(
+        !fixture
+            .host
+            .home
+            .join(".cursor")
+            .join("hooks.json")
+            .exists(),
+        "MCP only: no hooks are written for Cursor"
+    );
+
+    // A second run is a no-op.
+    let second = setup(&fixture, &[Agent::Cursor]);
+    for (_, outcome) in &second.entries {
+        let Outcome::Applied(plan, _) = outcome else {
+            panic!("expected applied, got {outcome:?}");
+        };
+        assert!(plan.is_noop(), "{plan:?}");
+    }
+}
+
+#[test]
+fn cursor_setup_creates_mcp_json_when_missing() {
+    let fixture = Fixture::empty(&[Agent::Cursor]);
+    setup(&fixture, &[Agent::Cursor]).into_result().unwrap();
+    let mcp = fixture.json(&fixture.host.cursor_mcp());
+    assert_eq!(mcp["mcpServers"].as_object().unwrap().len(), 1);
+    assert!(mcp["mcpServers"]["crosstalk"].is_object());
+}
+
 /// A fake user environment.
 struct Fixture {
     dir: TempDir,
@@ -65,12 +248,15 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Both agents installed, with existing configuration.
+    /// Every agent installed, with existing configuration.
     fn new() -> Self {
-        let fixture = Self::empty(&[Agent::Claude, Agent::Codex]);
+        let fixture = Self::empty(&Agent::ALL);
         fixture.write(&fixture.host.claude_json(), CLAUDE_JSON);
         fixture.write(&fixture.host.claude_settings(), CLAUDE_SETTINGS);
         fixture.write(&fixture.host.codex_config(), CODEX_CONFIG);
+        fixture.write(&fixture.host.cursor_mcp(), CURSOR_MCP);
+        fixture.write(&fixture.host.kiro_mcp(), CURSOR_MCP);
+        fixture.write(&fixture.host.opencode_config(), OPENCODE_JSON);
         fixture
     }
 
@@ -90,9 +276,9 @@ impl Fixture {
             std::fs::write(bin.join(name), "fake agent").unwrap();
         }
         let exe = dir.path().join("install").join(if cfg!(windows) {
-            "reason-network.exe"
+            "crosstalk.exe"
         } else {
-            "reason-network"
+            "crosstalk"
         });
         let host = Host {
             home,
@@ -141,7 +327,7 @@ impl Fixture {
         self.snapshot()
             .into_iter()
             .map(|(path, _)| path)
-            .filter(|path| path.to_string_lossy().contains(".reason-network-backup-"))
+            .filter(|path| path.to_string_lossy().contains(".crosstalk-backup-"))
             .collect()
     }
 }
@@ -156,19 +342,77 @@ fn our_handlers(settings: &Value, event: &str) -> usize {
         .into_iter()
         .flatten()
         .flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default())
-        .filter(|handler| {
-            handler["command"]
-                .as_str()
-                .is_some_and(|c| c.contains("hook --agent claude"))
-        })
+        .filter(is_our_claude_handler)
         .count()
+}
+
+/// A Crosstalk Claude hook in either form: a shell command line, or the
+/// exec form (`command` = executable, `args` = arguments) used on Windows.
+fn is_our_claude_handler(handler: &Value) -> bool {
+    let command = handler["command"].as_str().unwrap_or("");
+    let args: Vec<&str> = handler["args"]
+        .as_array()
+        .map(|args| args.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    command.contains("hook --agent claude")
+        || (command.contains("crosstalk") && args.starts_with(&["hook", "--agent", "claude"]))
+}
+
+#[test]
+fn an_old_shell_form_claude_hook_is_replaced() {
+    let fixture = Fixture::new();
+    // What earlier versions wrote: a quoted path followed by arguments. On
+    // Windows that is a PowerShell parse error, so it must be replaced, not kept.
+    let old = format!(
+        "\"{}\" hook --agent claude",
+        fixture.host.exe.display().to_string().replace('\\', "/")
+    );
+    let mut settings = fixture.json(&fixture.host.claude_settings());
+    let mut hooks = serde_json::Map::new();
+    for event in Agent::Claude.hook_events() {
+        hooks.insert(
+            event.to_string(),
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": old, "timeout": 10 }] }]),
+        );
+    }
+    settings["hooks"] = Value::Object(hooks);
+    fixture.write(
+        &fixture.host.claude_settings(),
+        &serde_json::to_string_pretty(&settings).unwrap(),
+    );
+
+    setup(&fixture, &[Agent::Claude]).into_result().unwrap();
+
+    let settings = fixture.json(&fixture.host.claude_settings());
+    for event in Agent::Claude.hook_events() {
+        assert_eq!(our_handlers(&settings, event), 1, "{event}");
+        let handler = &settings["hooks"][event][0]["hooks"][0];
+        if cfg!(windows) {
+            assert_eq!(
+                handler["command"].as_str(),
+                Some(fixture.host.exe.display().to_string().as_str()),
+                "{event}: exec form on Windows"
+            );
+            assert_eq!(handler["args"][0], "hook", "{event}");
+        } else {
+            assert!(handler.get("args").is_none(), "{event}");
+        }
+    }
+    // A second run is a no-op.
+    let second = setup(&fixture, &[Agent::Claude]);
+    for (_, outcome) in &second.entries {
+        let Outcome::Applied(plan, _) = outcome else {
+            panic!("expected applied, got {outcome:?}");
+        };
+        assert!(plan.is_noop(), "{plan:?}");
+    }
 }
 
 #[test]
 fn dry_run_makes_no_changes() {
     let fixture = Fixture::new();
     // A missing settings directory must not be created by a dry run either.
-    let empty = Fixture::empty(&[Agent::Claude, Agent::Codex]);
+    let empty = Fixture::empty(&Agent::ALL);
     for fixture in [&fixture, &empty] {
         let before = fixture.snapshot();
         let report = agents::run_setup(&fixture.host, &Agent::ALL, true);
@@ -185,7 +429,7 @@ fn dry_run_makes_no_changes() {
             "{rendered}"
         );
         assert!(
-            rendered.contains("add MCP server `reason-network`"),
+            rendered.contains("add MCP server `crosstalk`"),
             "{rendered}"
         );
     }
@@ -205,7 +449,7 @@ fn existing_agent_configuration_is_preserved() {
         claude["mcpServers"]["github"]["env"]["GITHUB_TOKEN"],
         "keep-me"
     );
-    let ours = &claude["mcpServers"]["reason-network"];
+    let ours = &claude["mcpServers"]["crosstalk"];
     assert_eq!(ours["type"], "stdio");
     assert_eq!(ours["command"], fixture.host.exe.display().to_string());
     assert_eq!(ours["args"], json!(["mcp", "--agent", "claude"]));
@@ -239,7 +483,7 @@ fn existing_agent_configuration_is_preserved() {
     assert!(codex.contains("DOCS_TOKEN = \"keep-me\""), "{codex}");
     assert!(codex.contains("command = \"echo user-stop\""), "{codex}");
     let doc: toml_edit::DocumentMut = codex.parse().unwrap();
-    let server = &doc["mcp_servers"]["reason-network"];
+    let server = &doc["mcp_servers"]["crosstalk"];
     assert_eq!(
         server["command"].as_str(),
         Some(fixture.host.exe.display().to_string().as_str())
@@ -309,7 +553,7 @@ fn setup_replaces_a_stale_entry_instead_of_adding_another() {
 
     // The executable moved (for example after reinstalling elsewhere).
     let mut moved = fixture.host.clone();
-    moved.exe = fixture.dir.path().join("elsewhere").join("reason-network");
+    moved.exe = fixture.dir.path().join("elsewhere").join("crosstalk");
     moved.data_dir = Some(fixture.dir.path().join("data"));
     agents::run_setup(&moved, &Agent::ALL, false)
         .into_result()
@@ -317,11 +561,11 @@ fn setup_replaces_a_stale_entry_instead_of_adding_another() {
 
     let claude = fixture.json(&fixture.host.claude_json());
     assert_eq!(
-        claude["mcpServers"]["reason-network"]["command"],
+        claude["mcpServers"]["crosstalk"]["command"],
         moved.exe.display().to_string()
     );
     assert_eq!(
-        claude["mcpServers"]["reason-network"]["env"]["REASON_NETWORK_DATA_DIR"],
+        claude["mcpServers"]["crosstalk"]["env"]["CROSSTALK_DATA_DIR"],
         fixture.dir.path().join("data").display().to_string()
     );
     assert_eq!(claude["mcpServers"].as_object().unwrap().len(), 2);
@@ -338,7 +582,7 @@ fn setup_replaces_a_stale_entry_instead_of_adding_another() {
     let start = codex["hooks"]["SessionStart"].as_array_of_tables().unwrap();
     assert_eq!(start.len(), 1);
     assert_eq!(
-        codex["mcp_servers"]["reason-network"]["env"]["REASON_NETWORK_DATA_DIR"].as_str(),
+        codex["mcp_servers"]["crosstalk"]["env"]["CROSSTALK_DATA_DIR"].as_str(),
         Some(
             fixture
                 .dir
@@ -370,13 +614,18 @@ fn backups_are_created_before_changes() {
                 ".claude.json" => CLAUDE_JSON,
                 "settings.json" => CLAUDE_SETTINGS,
                 "config.toml" => CODEX_CONFIG,
+                "mcp.json" => CURSOR_MCP,
+                "opencode.json" => OPENCODE_JSON,
                 other => panic!("unexpected file {other}"),
             };
             assert_eq!(original, expected, "backup holds the previous contents");
             backed_up += 1;
         }
     }
-    assert_eq!(backed_up, 3);
+    assert_eq!(
+        backed_up, 6,
+        "claude.json, settings.json, config.toml, cursor and kiro mcp.json, opencode.json"
+    );
 
     // Files that did not exist are created, with nothing to back up.
     let empty = Fixture::empty(&[Agent::Claude]);
@@ -422,9 +671,12 @@ fn missing_agents_produce_clear_errors() {
 
 #[test]
 fn invalid_existing_configuration_is_reported_and_left_alone() {
-    let fixture = Fixture::empty(&[Agent::Claude, Agent::Codex]);
+    let fixture = Fixture::empty(&Agent::ALL);
     fixture.write(&fixture.host.claude_json(), "{ not json");
     fixture.write(&fixture.host.codex_config(), "model = = 1");
+    fixture.write(&fixture.host.cursor_mcp(), "{ not json");
+    fixture.write(&fixture.host.kiro_mcp(), "{ not json");
+    fixture.write(&fixture.host.opencode_config(), "{ not json");
     let before = fixture.snapshot();
     let report = setup(&fixture, &Agent::ALL);
     for (_, outcome) in &report.entries {
@@ -463,7 +715,7 @@ fn inline_codex_hook_arrays_are_supported() {
     setup(&fixture, &[Agent::Codex]).into_result().unwrap();
     let text = fixture.read(&fixture.host.codex_config());
     assert!(text.contains("echo mine"), "{text}");
-    assert_eq!(text.matches("hook --agent codex").count(), 4, "{text}");
+    assert_eq!(text.matches("hook --agent codex").count(), 5, "{text}");
 }
 
 #[test]
@@ -490,7 +742,7 @@ fn inspect_reports_configuration_state() {
 #[test]
 fn cli_setup_dry_run_and_missing_agent() {
     let fixture = Fixture::empty(&[Agent::Claude]);
-    let exe = env!("CARGO_BIN_EXE_reason-network");
+    let exe = env!("CARGO_BIN_EXE_crosstalk");
     let run = |args: &[&str], path: &Path| {
         std::process::Command::new(exe)
             .args(args)
@@ -499,7 +751,7 @@ fn cli_setup_dry_run_and_missing_agent() {
             .env("PATH", path)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
-            .env("REASON_NETWORK_DATA_DIR", fixture.dir.path().join("data"))
+            .env("CROSSTALK_DATA_DIR", fixture.dir.path().join("data"))
             .output()
             .unwrap()
     };

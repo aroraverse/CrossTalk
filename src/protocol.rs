@@ -65,6 +65,39 @@ pub enum Method {
     Directory,
     /// Recent outbound messages and their delivery state.
     Outbox,
+    /// Search stored messages by a body substring (M4).
+    SearchMessages,
+    /// The full conversation thread between two sessions (M4).
+    Conversation,
+    /// Conversation partners of a session with unread counts (M4).
+    Conversations,
+    /// Record a file a session is editing, for overlap warnings (M4).
+    RecordFileActivity,
+    /// Files currently edited by more than one session (M4).
+    FileOverlaps,
+    /// A single aggregated snapshot for the dashboard (M4).
+    Overview,
+    /// Report or set the anchor (always-on mailbox/history) role (M4).
+    AnchorStatus,
+    /// Enable or disable the anchor role on this machine (M4).
+    SetAnchor,
+    /// Resolve a loose recipient selector to exactly one session.
+    ResolveRecipient,
+    /// Wait (bounded) for the reply to a message or question.
+    WaitReply,
+    /// Claim unread messages for hand-over to an agent: returns them once and
+    /// marks them read, so a hook or runner never processes one twice.
+    ClaimMessages,
+    /// Look at a single message and its delivery state.
+    GetMessage,
+    /// A message from the human operator to a local session.
+    SendAsHuman,
+    /// Every conversation (pair of participants) with last message and unread count.
+    AllConversations,
+    /// Inspect which agents are installed and configured.
+    SetupStatus,
+    /// Configure one agent (MCP server and hooks), with a backup first.
+    SetupApply,
 }
 
 /// A single request frame.
@@ -186,6 +219,9 @@ pub struct SendMessageParams {
     pub recipient_key: String,
     /// Message body.
     pub body: String,
+    /// Id of the message (or question) this one replies to.
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 /// Parameters for [`Method::Inbox`].
@@ -296,4 +332,138 @@ pub struct TeamRevokeParams {
     pub team_id: String,
     /// Peer id to revoke.
     pub peer_id: String,
+}
+
+/// Parameters for [`Method::SearchMessages`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchMessagesParams {
+    /// Case-insensitive substring to look for in message bodies.
+    pub query: String,
+    /// Restrict to messages this session sent or received.
+    #[serde(default)]
+    pub session_key: Option<String>,
+    /// Maximum number of matches to return.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Restrict to messages written by "human" or "agent" senders.
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// Only messages at or after this unix time.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Return neighbouring messages as context and the richer view.
+    #[serde(default)]
+    pub context: Option<bool>,
+}
+
+/// Parameters for [`Method::Conversation`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConversationParams {
+    /// One side of the conversation.
+    pub session_key: String,
+    /// The other session in the thread.
+    pub with: String,
+    /// Maximum number of messages.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Parameters for [`Method::Conversations`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConversationsParams {
+    /// Session whose conversation partners are listed.
+    pub session_key: String,
+}
+
+/// Parameters for [`Method::RecordFileActivity`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecordFileActivityParams {
+    /// Session editing the file.
+    pub session_key: String,
+    /// Repository the file belongs to, when known.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// File path (relative to the repository when possible).
+    pub path: String,
+    /// `read`, `edit` or `write`. Defaults to `edit`.
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+/// Parameters for [`Method::FileOverlaps`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileOverlapsParams {
+    /// Only consider activity within this many seconds. Defaults to 900.
+    #[serde(default)]
+    pub window_seconds: Option<i64>,
+}
+
+/// Parameters for [`Method::SetAnchor`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetAnchorParams {
+    /// Whether this machine should act as the team anchor.
+    pub enabled: bool,
+}
+
+/// Parameters for [Method::ResolveRecipient].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolveRecipientParams {
+    /// Session asking (its project scopes the search).
+    #[serde(default)]
+    pub session_key: Option<String>,
+    /// Exact session key, provider (codex, claude) or session name.
+    pub selector: String,
+}
+
+/// Parameters for [Method::WaitReply].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WaitReplyParams {
+    /// Session that sent the original message and is waiting.
+    pub session_key: String,
+    /// Id of the message (or question) a reply is awaited for.
+    pub message_id: String,
+    /// Only accept a reply from this session.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Maximum time to wait, in seconds. Clamped to 1..=900.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// Mark the reply as read when returned. Defaults to true.
+    #[serde(default)]
+    pub mark_read: Option<bool>,
+}
+
+/// Parameters for [Method::ClaimMessages].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaimMessagesParams {
+    /// Session whose unread messages are claimed.
+    pub session_key: String,
+    /// Maximum number of messages to claim. Defaults to 5.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Parameters for [Method::GetMessage].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetMessageParams {
+    /// The message id.
+    pub message_id: String,
+}
+/// Parameters for [`Method::SendAsHuman`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SendAsHumanParams {
+    /// Local session to message.
+    pub recipient_key: String,
+    /// Message body.
+    pub body: String,
+    /// Message or question this answers.
+    #[serde(default)]
+    pub reply_to: Option<String>,
+}
+
+/// Parameters for [`Method::SetupApply`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetupApplyParams {
+    /// `claude` or `codex`.
+    pub agent: String,
 }

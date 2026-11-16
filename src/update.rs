@@ -2,10 +2,10 @@
 //!
 //! Every release publishes, per target:
 //!
-//! * `reason-network-<version>-<target>.zip` (Windows) or `.tar.gz` (others):
+//! * `crosstalk-<version>-<target>.zip` (Windows) or `.tar.gz` (others):
 //!   the executable plus README, INSTALL and VERSION files;
-//! * `reason-network-<version>-<target>[.exe]`: the bare executable, used by
-//!   `reason-network update`;
+//! * `crosstalk-<version>-<target>[.exe]`: the bare executable, used by
+//!   `crosstalk update`;
 //!
 //! and one `SHA256SUMS` file covering all of them (`sha256sum` format).
 //!
@@ -30,11 +30,11 @@ use crate::util;
 /// Name of the checksum file in every release.
 pub const SUMS_FILE: &str = "SHA256SUMS";
 /// Executable and package name prefix.
-pub const PRODUCT: &str = "reason-network";
+pub const PRODUCT: &str = "crosstalk";
 /// Environment variable naming an explicit release source (URL or directory).
-pub const ENV_RELEASE_URL: &str = "REASON_NETWORK_RELEASE_URL";
+pub const ENV_RELEASE_URL: &str = "CROSSTALK_RELEASE_URL";
 /// Environment variable naming the GitHub repository (`owner/name`).
-pub const ENV_REPO: &str = "REASON_NETWORK_REPO";
+pub const ENV_REPO: &str = "CROSSTALK_REPO";
 
 /// The version of this build.
 pub fn current_version() -> Version {
@@ -145,7 +145,7 @@ fn is_windows_target(target: &str) -> bool {
     target.contains("windows")
 }
 
-/// `reason-network-<version>-<target>.zip|.tar.gz`.
+/// `crosstalk-<version>-<target>.zip|.tar.gz`.
 pub fn package_name(version: &Version, target: &str) -> String {
     let extension = if is_windows_target(target) {
         "zip"
@@ -155,7 +155,7 @@ pub fn package_name(version: &Version, target: &str) -> String {
     format!("{PRODUCT}-{version}-{target}.{extension}")
 }
 
-/// `reason-network-<version>-<target>[.exe]`, the bare executable.
+/// `crosstalk-<version>-<target>[.exe]`, the bare executable.
 pub fn binary_name(version: &Version, target: &str) -> String {
     let extension = if is_windows_target(target) {
         ".exe"
@@ -295,8 +295,8 @@ impl Source {
         )))
     }
 
-    /// The configured default: `REASON_NETWORK_RELEASE_URL`, then
-    /// `REASON_NETWORK_REPO` (runtime, then build time).
+    /// The configured default: `CROSSTALK_RELEASE_URL`, then
+    /// `CROSSTALK_REPO` (runtime, then build time).
     pub fn from_env() -> Result<Self> {
         if let Ok(value) = std::env::var(ENV_RELEASE_URL)
             && !value.trim().is_empty()
@@ -306,7 +306,7 @@ impl Source {
         let repo = std::env::var(ENV_REPO)
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| option_env!("REASON_NETWORK_REPO").map(str::to_string))
+            .or_else(|| option_env!("CROSSTALK_REPO").map(str::to_string))
             .filter(|value| !value.trim().is_empty());
         match repo {
             Some(repo) => Self::parse(&repo),
@@ -557,7 +557,7 @@ pub fn install_executable(exe: &Path, bytes: &[u8]) -> Result<PathBuf> {
     Ok(previous)
 }
 
-/// Run `<exe> --version` and require it to identify as reason-network.
+/// Run `<exe> --version` and require it to identify as crosstalk.
 fn smoke_test(exe: &Path) -> Result<String> {
     let output = std::process::Command::new(exe)
         .arg("--version")
@@ -624,19 +624,19 @@ mod tests {
         let version = v("0.2.0");
         assert_eq!(
             package_name(&version, "x86_64-pc-windows-msvc"),
-            "reason-network-0.2.0-x86_64-pc-windows-msvc.zip"
+            "crosstalk-0.2.0-x86_64-pc-windows-msvc.zip"
         );
         assert_eq!(
             package_name(&version, "aarch64-apple-darwin"),
-            "reason-network-0.2.0-aarch64-apple-darwin.tar.gz"
+            "crosstalk-0.2.0-aarch64-apple-darwin.tar.gz"
         );
         assert_eq!(
             binary_name(&version, "x86_64-pc-windows-msvc"),
-            "reason-network-0.2.0-x86_64-pc-windows-msvc.exe"
+            "crosstalk-0.2.0-x86_64-pc-windows-msvc.exe"
         );
         assert_eq!(
             binary_name(&version, "x86_64-unknown-linux-gnu"),
-            "reason-network-0.2.0-x86_64-unknown-linux-gnu"
+            "crosstalk-0.2.0-x86_64-unknown-linux-gnu"
         );
         for (_, _, target) in TARGETS {
             for name in [
@@ -651,24 +651,18 @@ mod tests {
             }
         }
         assert_eq!(parse_asset_name("SHA256SUMS"), None);
-        assert_eq!(
-            parse_asset_name("reason-network-x-aarch64-apple-darwin"),
-            None
-        );
+        assert_eq!(parse_asset_name("crosstalk-x-aarch64-apple-darwin"), None);
     }
 
     #[test]
     fn sums_parse_and_reject_garbage() {
         let hash = "a".repeat(64);
         let sums = parse_sums(&format!(
-            "{hash}  reason-network-0.1.0-x86_64-apple-darwin\n\n{hash} *reason-network-0.2.0-x86_64-apple-darwin.tar.gz\n"
+            "{hash}  crosstalk-0.1.0-x86_64-apple-darwin\n\n{hash} *crosstalk-0.2.0-x86_64-apple-darwin.tar.gz\n"
         ))
         .unwrap();
         assert_eq!(sums.len(), 2);
-        assert_eq!(
-            sums[1].name,
-            "reason-network-0.2.0-x86_64-apple-darwin.tar.gz"
-        );
+        assert_eq!(sums[1].name, "crosstalk-0.2.0-x86_64-apple-darwin.tar.gz");
         assert_eq!(select_version(&sums, None).unwrap(), v("0.2.0"));
         assert_eq!(
             select_version(&sums, Some(&v("0.1.0"))).unwrap(),
@@ -693,8 +687,8 @@ mod tests {
     #[test]
     fn sources_parse() {
         assert_eq!(
-            Source::parse("acme/reason-network").unwrap(),
-            Source::Http("https://github.com/acme/reason-network/releases".into())
+            Source::parse("acme/crosstalk").unwrap(),
+            Source::Http("https://github.com/acme/crosstalk/releases".into())
         );
         assert_eq!(
             Source::parse("https://example.com/rel/").unwrap(),

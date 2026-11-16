@@ -7,10 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use reason_network::update::{self, Source, Version};
-use reason_network::util;
+use crosstalk::update::{self, Source, Version};
+use crosstalk::util;
 
-const REAL_EXE: &str = env!("CARGO_BIN_EXE_reason-network");
+const REAL_EXE: &str = env!("CARGO_BIN_EXE_crosstalk");
 
 fn target() -> &'static str {
     update::current_target().expect("tests run on a release target")
@@ -69,7 +69,7 @@ impl Install {
         std::fs::copy(REAL_EXE, &exe).unwrap();
         let data = dir.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(data.join("reason-network.db"), b"user data").unwrap();
+        std::fs::write(data.join("crosstalk.db"), b"user data").unwrap();
         std::fs::write(data.join("machine.key"), b"secret").unwrap();
         Self { dir, exe, data }
     }
@@ -80,7 +80,7 @@ impl Install {
 
     fn assert_data_intact(&self) {
         assert_eq!(
-            std::fs::read(self.data.join("reason-network.db")).unwrap(),
+            std::fs::read(self.data.join("crosstalk.db")).unwrap(),
             b"user data"
         );
         assert_eq!(
@@ -98,14 +98,14 @@ impl Install {
     }
 }
 
-/// A runnable reason-network binary whose bytes differ from the installed
+/// A runnable crosstalk binary whose bytes differ from the installed
 /// one, standing in for a newer build.
 fn newer_build() -> Vec<u8> {
     let mut bytes = std::fs::read(REAL_EXE).unwrap();
     // Trailing bytes after a PE/ELF image do not affect execution. macOS
     // validates code signatures, so the bytes stay unmodified there.
     if !cfg!(target_os = "macos") {
-        bytes.extend_from_slice(b"\0reason-network-test-release-marker");
+        bytes.extend_from_slice(b"\0crosstalk-test-release-marker");
     }
     bytes
 }
@@ -207,7 +207,7 @@ async fn update_installs_a_verified_release_and_keeps_data() {
         .arg("--version")
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("reason-network"));
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("crosstalk"));
 
     // Running it again is safe: nothing newer, nothing changes.
     let again = update::update(&release.source(), None, target(), &install.exe).await;
@@ -318,20 +318,20 @@ fn cli_update_check_against_a_local_release() {
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        format!("reason-network {}", env!("CARGO_PKG_VERSION"))
+        format!("crosstalk {}", env!("CARGO_PKG_VERSION"))
     );
 }
 
 #[test]
 fn cli_update_without_a_source_explains_how_to_configure_one() {
-    if option_env!("REASON_NETWORK_REPO").is_some() {
+    if option_env!("CROSSTALK_REPO").is_some() {
         // Release builds have a baked-in repository; nothing to test here.
         return;
     }
     let output = std::process::Command::new(REAL_EXE)
         .args(["update", "--check"])
-        .env_remove("REASON_NETWORK_REPO")
-        .env_remove("REASON_NETWORK_RELEASE_URL")
+        .env_remove("CROSSTALK_REPO")
+        .env_remove("CROSSTALK_RELEASE_URL")
         .output()
         .unwrap();
     assert!(!output.status.success());

@@ -64,7 +64,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
-    let temp = path.with_file_name(format!(".{file_name}.reason-network-tmp"));
+    let temp = path.with_file_name(format!(".{file_name}.crosstalk-tmp"));
     std::fs::write(&temp, contents)?;
     match std::fs::rename(&temp, path) {
         Ok(()) => Ok(()),
@@ -88,12 +88,10 @@ pub fn backup_file(path: &Path) -> std::io::Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let mut candidate = path.with_file_name(format!("{file_name}.reason-network-backup-{stamp}"));
+    let mut candidate = path.with_file_name(format!("{file_name}.crosstalk-backup-{stamp}"));
     let mut counter = 1;
     while candidate.exists() {
-        candidate = path.with_file_name(format!(
-            "{file_name}.reason-network-backup-{stamp}-{counter}"
-        ));
+        candidate = path.with_file_name(format!("{file_name}.crosstalk-backup-{stamp}-{counter}"));
         counter += 1;
     }
     std::fs::copy(path, &candidate)?;

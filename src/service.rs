@@ -29,10 +29,10 @@ use crate::util;
 /// Environment variables captured into the service definition at install
 /// time, when set.
 const PASSTHROUGH_ENV: &[&str] = &[
-    "REASON_NETWORK_NET",
-    "REASON_NETWORK_RELAY",
-    "REASON_NETWORK_DISCOVERY",
-    "REASON_NETWORK_CLAUDE_BIN",
+    "CROSSTALK_NET",
+    "CROSSTALK_RELAY",
+    "CROSSTALK_DISCOVERY",
+    "CROSSTALK_CLAUDE_BIN",
 ];
 
 /// How long `start` waits for the daemon to answer.
@@ -43,7 +43,7 @@ const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 /// Everything needed to define the service on any platform.
 #[derive(Debug, Clone)]
 pub struct ServiceSpec {
-    /// `reason-network`, or `reason-network-<hash>` for a non-default data dir.
+    /// `crosstalk`, or `crosstalk-<hash>` for a non-default data dir.
     pub id: String,
     /// The executable the service runs.
     pub exe: PathBuf,
@@ -59,7 +59,7 @@ impl ServiceSpec {
     /// Describe the service for a configuration.
     ///
     /// `pinned` is true when the data directory was chosen explicitly
-    /// (`--data-dir` or `REASON_NETWORK_DATA_DIR`); it is then written into the
+    /// (`--data-dir` or `CROSSTALK_DATA_DIR`); it is then written into the
     /// definition and gives the service its own id.
     pub fn new(config: &Config, exe: PathBuf, pinned: bool) -> Self {
         let mut env = Vec::new();
@@ -69,11 +69,11 @@ impl ServiceSpec {
                 config.data_dir.display().to_string(),
             ));
             format!(
-                "reason-network-{}",
+                "crosstalk-{}",
                 util::short_hash(&util::normalize_path(&config.data_dir))
             )
         } else {
-            "reason-network".to_string()
+            "crosstalk".to_string()
         };
         for name in PASSTHROUGH_ENV {
             if let Ok(value) = std::env::var(name)
@@ -93,15 +93,15 @@ impl ServiceSpec {
 
     /// Windows Task Scheduler task name.
     pub fn windows_task_name(&self) -> String {
-        match self.id.strip_prefix("reason-network") {
-            Some(suffix) => format!("ReasonNetwork{suffix}"),
+        match self.id.strip_prefix("crosstalk") {
+            Some(suffix) => format!("Crosstalk{suffix}"),
             None => self.id.clone(),
         }
     }
 
     /// launchd label.
     pub fn launchd_label(&self) -> String {
-        format!("com.reason-network.{}", self.id)
+        format!("com.crosstalk.{}", self.id)
     }
 
     /// systemd unit file name.
@@ -127,11 +127,9 @@ impl ServiceSpec {
     /// The systemd user unit.
     pub fn systemd_unit(&self) -> String {
         let mut unit = String::new();
-        unit.push_str(
-            "# Managed by `reason-network service`. Changes are overwritten on install.\n",
-        );
+        unit.push_str("# Managed by `crosstalk service`. Changes are overwritten on install.\n");
         unit.push_str("[Unit]\n");
-        unit.push_str("Description=Reason Network daemon\n");
+        unit.push_str("Description=Crosstalk daemon\n");
         unit.push_str("After=network-online.target\n\n");
         unit.push_str("[Service]\n");
         unit.push_str("Type=simple\n");
@@ -166,7 +164,7 @@ impl ServiceSpec {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Managed by `reason-network service`. Changes are overwritten on install. -->
+<!-- Managed by `crosstalk service`. Changes are overwritten on install. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -217,7 +215,7 @@ impl ServiceSpec {
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Reason Network daemon (managed by reason-network service)</Description>
+    <Description>Crosstalk daemon (managed by crosstalk service)</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -427,7 +425,7 @@ async fn wait_until(endpoint: &Endpoint, running: bool, timeout: Duration) -> bo
 
 fn unsupported() -> Error {
     Error::Other(
-        "background services are supported on Windows, Linux (systemd) and macOS (launchd); run `reason-network daemon-start` under your own supervisor on this platform".into(),
+        "background services are supported on Windows, Linux (systemd) and macOS (launchd); run `crosstalk daemon-start` under your own supervisor on this platform".into(),
     )
 }
 
@@ -455,7 +453,7 @@ pub fn install(spec: &ServiceSpec) -> Result<String> {
             )?;
         }
         Ok(format!(
-            "installed launchd agent {} ({}); it starts at login, or now with `reason-network service start`",
+            "installed launchd agent {} ({}); it starts at login, or now with `crosstalk service start`",
             spec.launchd_label(),
             path.display()
         ))
@@ -469,7 +467,7 @@ pub fn install(spec: &ServiceSpec) -> Result<String> {
             &["--user", "enable", &spec.systemd_unit_name()],
         )?;
         Ok(format!(
-            "installed systemd user service {} ({}); it starts at login, or now with `reason-network service start`",
+            "installed systemd user service {} ({}); it starts at login, or now with `crosstalk service start`",
             spec.systemd_unit_name(),
             path.display()
         ))
@@ -511,7 +509,7 @@ fn install_windows(spec: &ServiceSpec) -> Result<String> {
     let _ = std::fs::remove_file(&file);
     result?;
     Ok(format!(
-        "installed Task Scheduler task \\{} for {user}; it starts at logon, or now with `reason-network service start`",
+        "installed Task Scheduler task \\{} for {user}; it starts at logon, or now with `crosstalk service start`",
         spec.windows_task_name()
     ))
 }
@@ -523,7 +521,7 @@ pub async fn start(spec: &ServiceSpec, endpoint: &Endpoint) -> Result<String> {
     }
     if !is_installed(spec) {
         return Err(Error::Other(
-            "the service is not installed: run `reason-network service install` first (or run `reason-network daemon-start` in a terminal)".into(),
+            "the service is not installed: run `crosstalk service install` first (or run `crosstalk daemon-start` in a terminal)".into(),
         ));
     }
     if cfg!(windows) {
@@ -582,7 +580,7 @@ pub async fn stop(spec: &ServiceSpec, endpoint: &Endpoint) -> Result<String> {
         Ok("daemon stopped".into())
     } else {
         Err(Error::Other(
-            "the daemon did not stop within 15 s; check `reason-network daemon-status`".into(),
+            "the daemon did not stop within 15 s; check `crosstalk daemon-status`".into(),
         ))
     }
 }
@@ -729,7 +727,7 @@ fn run_checked(program: &str, args: &[&str]) -> Result<String> {
 fn require_systemd() -> Result<()> {
     run_quiet("systemctl", &["--user", "show-environment"]).map_err(|_| {
         Error::Other(
-            "systemd user services are not available (no `systemctl --user` session); run `reason-network daemon-start` under your own supervisor, or enable lingering with `loginctl enable-linger $USER`".into(),
+            "systemd user services are not available (no `systemctl --user` session); run `crosstalk daemon-start` under your own supervisor, or enable lingering with `loginctl enable-linger $USER`".into(),
         )
     })
 }
@@ -755,7 +753,7 @@ mod tests {
 
     fn spec(pinned: bool) -> ServiceSpec {
         let config = Config::with_data_dir("/data/rn & co");
-        let mut spec = ServiceSpec::new(&config, PathBuf::from("/opt/rn/reason-network"), pinned);
+        let mut spec = ServiceSpec::new(&config, PathBuf::from("/opt/rn/crosstalk"), pinned);
         // Do not depend on the test runner's environment.
         spec.env.retain(|(key, _)| key == ENV_DATA_DIR);
         spec
@@ -764,9 +762,9 @@ mod tests {
     #[test]
     fn default_data_dir_uses_the_plain_id() {
         let spec = spec(false);
-        assert_eq!(spec.id, "reason-network");
-        assert_eq!(spec.windows_task_name(), "ReasonNetwork");
-        assert_eq!(spec.launchd_label(), "com.reason-network.reason-network");
+        assert_eq!(spec.id, "crosstalk");
+        assert_eq!(spec.windows_task_name(), "Crosstalk");
+        assert_eq!(spec.launchd_label(), "com.crosstalk.crosstalk");
         assert!(spec.env.is_empty());
         assert_eq!(spec.launch_args(), vec!["service", "launch"]);
     }
@@ -774,9 +772,9 @@ mod tests {
     #[test]
     fn pinned_data_dir_gets_its_own_id_and_environment() {
         let spec = spec(true);
-        assert!(spec.id.starts_with("reason-network-"));
-        assert_eq!(spec.id.len(), "reason-network-".len() + 8);
-        assert!(spec.windows_task_name().starts_with("ReasonNetwork-"));
+        assert!(spec.id.starts_with("crosstalk-"));
+        assert_eq!(spec.id.len(), "crosstalk-".len() + 8);
+        assert!(spec.windows_task_name().starts_with("Crosstalk-"));
         assert_eq!(
             spec.launch_args(),
             vec!["service", "launch", "--data-dir", "/data/rn & co"]
@@ -786,8 +784,8 @@ mod tests {
     #[test]
     fn systemd_unit_runs_the_daemon_with_escaped_values() {
         let unit = spec(true).systemd_unit();
-        assert!(unit.contains("ExecStart=\"/opt/rn/reason-network\" daemon-start\n"));
-        assert!(unit.contains("Environment=\"REASON_NETWORK_DATA_DIR=/data/rn & co\"\n"));
+        assert!(unit.contains("ExecStart=\"/opt/rn/crosstalk\" daemon-start\n"));
+        assert!(unit.contains("Environment=\"CROSSTALK_DATA_DIR=/data/rn & co\"\n"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         assert_eq!(systemd_quote("100%"), "\"100%%\"");
@@ -796,7 +794,7 @@ mod tests {
     #[test]
     fn launchd_plist_is_escaped_and_restarts_only_on_failure() {
         let plist = spec(true).launchd_plist();
-        assert!(plist.contains("<string>/opt/rn/reason-network</string>"));
+        assert!(plist.contains("<string>/opt/rn/crosstalk</string>"));
         assert!(plist.contains("<string>daemon-start</string>"));
         assert!(plist.contains("<string>/data/rn &amp; co</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key>\n    <false/>"));
@@ -811,7 +809,7 @@ mod tests {
         assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
-        assert!(xml.contains("<Command>/opt/rn/reason-network</Command>"));
+        assert!(xml.contains("<Command>/opt/rn/crosstalk</Command>"));
         assert!(xml.contains(
             "<Arguments>service launch --data-dir &quot;/data/rn &amp; co&quot;</Arguments>"
         ));

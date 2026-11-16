@@ -9,7 +9,7 @@ mod common;
 
 use std::time::Duration;
 
-use reason_network::protocol::Method;
+use crosstalk::protocol::Method;
 use serde_json::{Value, json};
 
 use common::TestDaemon;

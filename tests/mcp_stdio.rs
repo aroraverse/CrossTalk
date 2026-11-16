@@ -1,6 +1,6 @@
 //! End-to-end test of the MCP server over stdio.
 //!
-//! The test speaks raw JSON-RPC to the `reason-network mcp` binary, exactly
+//! The test speaks raw JSON-RPC to the `crosstalk mcp` binary, exactly
 //! like an MCP client would.
 
 mod common;
@@ -43,11 +43,11 @@ fn start_mcp_server(
     ChildStdin,
     Lines<BufReader<tokio::process::ChildStdout>>,
 ) {
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_reason-network"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_crosstalk"))
         .arg("mcp")
         .arg("--session-key")
         .arg("mcp-agent")
-        .env("REASON_NETWORK_DATA_DIR", daemon.data_dir())
+        .env("CROSSTALK_DATA_DIR", daemon.data_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -59,7 +59,7 @@ fn start_mcp_server(
 }
 
 #[tokio::test]
-async fn the_mcp_server_exposes_the_four_tools_over_stdio() {
+async fn the_mcp_server_exposes_its_tools_over_stdio() {
     let daemon = TestDaemon::start().await;
     let (mut child, mut stdin, mut stdout) = start_mcp_server(&daemon);
 
@@ -72,16 +72,13 @@ async fn the_mcp_server_exposes_the_four_tools_over_stdio() {
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": { "name": "reason-network-test", "version": "1.0.0" }
+                "clientInfo": { "name": "crosstalk-test", "version": "1.0.0" }
             }
         }),
     )
     .await;
     let initialized = read_response(&mut stdout, 1).await;
-    assert_eq!(
-        initialized["result"]["serverInfo"]["name"],
-        "reason-network"
-    );
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "crosstalk");
 
     send(
         &mut stdin,
@@ -102,7 +99,14 @@ async fn the_mcp_server_exposes_the_four_tools_over_stdio() {
         .collect();
     assert_eq!(
         names,
-        vec!["ask_user", "check_inbox", "list_team", "send_message"]
+        vec![
+            "ask_user",
+            "check_inbox",
+            "list_team",
+            "resolve_recipient",
+            "send_message",
+            "wait_for_reply",
+        ]
     );
 
     let _ = child.kill().await;
@@ -113,7 +117,7 @@ async fn the_mcp_server_calls_the_daemon() {
     let daemon = TestDaemon::start().await;
     daemon
         .call(
-            reason_network::protocol::Method::Register,
+            crosstalk::protocol::Method::Register,
             json!({ "session_key": "peer", "name": "peer", "agent_type": "codex" }),
         )
         .await
@@ -130,7 +134,7 @@ async fn the_mcp_server_calls_the_daemon() {
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": { "name": "reason-network-test", "version": "1.0.0" }
+                "clientInfo": { "name": "crosstalk-test", "version": "1.0.0" }
             }
         }),
     )

@@ -55,3 +55,10 @@ logs/
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Videos
+
+/video/
+# Showcase run captures (large, contain local paths)
+/demo/showcase/run/frames/
+/demo/showcase/run/logs/

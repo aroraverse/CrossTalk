@@ -1,42 +1,42 @@
-//! `reason-network` command line interface.
+//! `crosstalk` command line interface.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use reason_network::agents::{self, Agent};
-use reason_network::config::{Config, ENV_DATA_DIR, ENV_SESSION_KEY};
-use reason_network::daemon::{Daemon, VERSION};
-use reason_network::error::{Error, Result};
-use reason_network::ipc;
-use reason_network::protocol::{Method, Request};
+use crosstalk::agents::{self, Agent};
+use crosstalk::config::{Config, ENV_DATA_DIR, ENV_SESSION_KEY};
+use crosstalk::daemon::{Daemon, VERSION};
+use crosstalk::error::{Error, Result};
+use crosstalk::ipc;
+use crosstalk::protocol::{Method, Request};
 use serde_json::{Value, json};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "reason-network",
+    name = "crosstalk",
     version,
     about = "Peer-to-peer messaging for AI coding agents",
-    long_about = "reason-network lets AI coding agents on the same computer register themselves, \
+    long_about = "crosstalk lets AI coding agents on the same computer register themselves, \
 discover each other and exchange messages through a local daemon.\n\n\
 SESSION IDENTITY\n\
   Commands that act as an agent need a session key. Pass --session (or --session-key for the \
-MCP server) or set REASON_NETWORK_SESSION_KEY in the environment.\n\n\
+MCP server) or set CROSSTALK_SESSION_KEY in the environment.\n\n\
 STORAGE\n\
-  The database lives in the application data directory. Set REASON_NETWORK_DATA_DIR or pass \
+  The database lives in the application data directory. Set CROSSTALK_DATA_DIR or pass \
 --data-dir to override it (for example to isolate tests).\n\n\
 GETTING STARTED\n\
-  reason-network setup --agent all     configure Claude Code and Codex\n\
-  reason-network service install       start the daemon at login\n\
-  reason-network service start         start it now\n\
-  reason-network doctor                check everything"
+  crosstalk setup --agent all     configure Claude Code and Codex\n\
+  crosstalk service install       start the daemon at login\n\
+  crosstalk service start         start it now\n\
+  crosstalk doctor                check everything"
 )]
 struct Cli {
     /// Print the raw JSON result instead of a human readable summary.
     #[arg(long, global = true)]
     json: bool,
 
-    /// Application data directory. Overrides REASON_NETWORK_DATA_DIR.
+    /// Application data directory. Overrides CROSSTALK_DATA_DIR.
     #[arg(long, global = true, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
@@ -60,7 +60,7 @@ enum Command {
         /// Human readable session name.
         #[arg(long)]
         name: String,
-        /// Stable session key. Defaults to REASON_NETWORK_SESSION_KEY or a generated key.
+        /// Stable session key. Defaults to CROSSTALK_SESSION_KEY or a generated key.
         #[arg(long)]
         session_key: Option<String>,
         /// Agent type, for example `claude` or `codex`.
@@ -130,7 +130,7 @@ enum Command {
 
     /// Show the inbox of a session.
     Inbox {
-        /// Session key. Defaults to REASON_NETWORK_SESSION_KEY.
+        /// Session key. Defaults to CROSSTALK_SESSION_KEY.
         #[arg(long)]
         session: Option<String>,
         /// Maximum number of messages.
@@ -143,14 +143,14 @@ enum Command {
 
     /// Count the unread messages of a session.
     Unread {
-        /// Session key. Defaults to REASON_NETWORK_SESSION_KEY.
+        /// Session key. Defaults to CROSSTALK_SESSION_KEY.
         #[arg(long)]
         session: Option<String>,
     },
 
     /// Mark messages as read.
     MarkRead {
-        /// Session key. Defaults to REASON_NETWORK_SESSION_KEY.
+        /// Session key. Defaults to CROSSTALK_SESSION_KEY.
         #[arg(long)]
         session: Option<String>,
         /// Message id. Repeat for several messages. Marks everything when omitted.
@@ -160,7 +160,7 @@ enum Command {
 
     /// Ask a human a question on behalf of a session.
     AskQuestion {
-        /// Session asking the question. Defaults to REASON_NETWORK_SESSION_KEY.
+        /// Session asking the question. Defaults to CROSSTALK_SESSION_KEY.
         #[arg(long)]
         session: Option<String>,
         /// The question text.
@@ -260,7 +260,7 @@ enum Command {
 
     /// Run the MCP server on stdio.
     Mcp {
-        /// Session key of this agent. Defaults to REASON_NETWORK_SESSION_KEY.
+        /// Session key of this agent. Defaults to CROSSTALK_SESSION_KEY.
         #[arg(long)]
         session_key: Option<String>,
         /// The agent that launches the server (`claude` or `codex`). Without a
@@ -270,7 +270,7 @@ enum Command {
         agent: Option<String>,
     },
 
-    /// Configure a coding agent to use Reason Network (MCP server and hooks).
+    /// Configure a coding agent to use Crosstalk (MCP server and hooks).
     Setup {
         /// `claude`, `codex` or `all`.
         #[arg(long)]
@@ -289,6 +289,46 @@ enum Command {
         action: ServiceAction,
     },
 
+    /// OPT-IN: resume Codex sessions that have no running process to answer peer messages.
+    ///
+    /// Unattended: each turn resumes the session's own Codex conversation with
+    /// `codex exec resume`, in a read-only sandbox, treating peer messages as
+    /// untrusted. Sessions with a live process are left to their hooks.
+    AgentRunner {
+        /// Only handle this session key (repeatable). Default: every eligible Codex session.
+        #[arg(long = "session", value_name = "KEY")]
+        sessions: Vec<String>,
+        /// Seconds between scans.
+        #[arg(long, default_value_t = 10)]
+        poll_seconds: u64,
+        /// Scan once and exit.
+        #[arg(long)]
+        once: bool,
+        /// Show what would run without starting Codex.
+        #[arg(long)]
+        dry_run: bool,
+        /// The Codex executable.
+        #[arg(long, default_value = "codex")]
+        codex_bin: String,
+    },
+
+    /// Open the local web dashboard in the default browser.
+    Dashboard {
+        /// Print the URL instead of opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+
+    /// Show or set the team anchor (always-on mailbox/history) role.
+    Anchor {
+        /// Designate this machine as the team anchor.
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Stop this machine acting as the team anchor.
+        #[arg(long)]
+        disable: bool,
+    },
+
     /// Check for, or explicitly install, a newer release of this executable.
     Update {
         /// Only report whether an update is available; change nothing.
@@ -298,8 +338,8 @@ enum Command {
         #[arg(long = "version", value_name = "VERSION")]
         target_version: Option<String>,
         /// Release source: GitHub `owner/name`, a URL, or a local directory
-        /// with SHA256SUMS. Defaults to REASON_NETWORK_RELEASE_URL /
-        /// REASON_NETWORK_REPO.
+        /// with SHA256SUMS. Defaults to CROSSTALK_RELEASE_URL /
+        /// CROSSTALK_REPO.
         #[arg(long)]
         source: Option<String>,
     },
@@ -643,7 +683,7 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("asked question {}", value(&result, "id"));
                 println!(
-                    "answer it with: reason-network ask-reply {} \"<answer>\"",
+                    "answer it with: crosstalk ask-reply {} \"<answer>\"",
                     value(&result, "id")
                 );
             }
@@ -756,7 +796,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!("  admin: {}", value(&result, "admin_peer"));
             println!();
             println!(
-                "invite another machine with: reason-network team-invite --team {}",
+                "invite another machine with: crosstalk team-invite --team {}",
                 value(&result, "team_id")
             );
             Ok(())
@@ -777,7 +817,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!("team:     {}", value(&result, "team_id"));
             println!("expires:  {}", value(&result, "expires_at"));
             println!("copy the token line to the other machine and run:");
-            println!("  reason-network team-join <token>");
+            println!("  crosstalk team-join <token>");
             Ok(())
         }
         Command::TeamJoin { token } => {
@@ -803,7 +843,7 @@ async fn run(cli: Cli) -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
             if teams.is_empty() {
-                println!("no teams; create one with: reason-network team-create --name <name>");
+                println!("no teams; create one with: crosstalk team-create --name <name>");
                 return Ok(());
             }
             println!("{:<34} {:<20} {:<8} MEMBERS", "TEAM ID", "NAME", "ROLE");
@@ -983,22 +1023,22 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Mcp { session_key, agent } => {
             let agent = agent.as_deref().map(Agent::parse).transpose()?;
-            let session_key = reason_network::mcp::resolve_session_key(session_key, agent)?;
-            reason_network::mcp::serve(config, session_key, agent).await
+            let session_key = crosstalk::mcp::resolve_session_key(session_key, agent)?;
+            crosstalk::mcp::serve(config, session_key, agent).await
         }
         Command::Setup { agent, dry_run } => setup(&agent, dry_run, pinned_dir, cli.json),
         Command::Doctor => {
             let host = agents::Host::from_env(pinned_dir.clone())?;
             let spec = service_spec(&config, &pinned_dir)?;
-            let checks = reason_network::doctor::run(&config, &host, &spec).await;
+            let checks = crosstalk::doctor::run(&config, &host, &spec).await;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&checks)?);
             } else {
-                print!("{}", reason_network::doctor::render(&checks));
+                print!("{}", crosstalk::doctor::render(&checks));
             }
             if checks
                 .iter()
-                .any(|check| check.level == reason_network::doctor::Level::Fail)
+                .any(|check| check.level == crosstalk::doctor::Level::Fail)
             {
                 return Err(Error::Other("doctor found failures".into()));
             }
@@ -1006,6 +1046,55 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Service { action } => {
             service_command(&config, &pinned_dir, action, cli.json).await
+        }
+        Command::AgentRunner {
+            sessions,
+            poll_seconds,
+            once,
+            dry_run,
+            codex_bin,
+        } => {
+            crosstalk::runner::run(
+                &config,
+                crosstalk::runner::RunnerOptions {
+                    sessions,
+                    poll: std::time::Duration::from_secs(poll_seconds.max(1)),
+                    once,
+                    dry_run,
+                    codex_bin,
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+        Command::Dashboard { no_open } => dashboard_command(&config, no_open, cli.json).await,
+        Command::Anchor { enable, disable } => {
+            let result = if enable || disable {
+                call(
+                    &config,
+                    Method::SetAnchor,
+                    json!({ "enabled": enable && !disable }),
+                )
+                .await?
+            } else {
+                call(&config, Method::AnchorStatus, json!({})).await?
+            };
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                let on = result.get("anchor").and_then(Value::as_bool) == Some(true);
+                println!("anchor:    {}", if on { "enabled" } else { "disabled" });
+                println!("messages:  {}", value(&result, "messages_retained"));
+                if let Some(note) = result.get("note").and_then(Value::as_str) {
+                    println!("{note}");
+                }
+                if on {
+                    println!(
+                        "keep it on at login: `crosstalk service install` then `service start`"
+                    );
+                }
+            }
+            Ok(())
         }
         Command::Update {
             check,
@@ -1016,21 +1105,28 @@ async fn run(cli: Cli) -> Result<()> {
             // Hooks must never break the agent: any problem is reported on
             // stderr and the hook still exits successfully.
             let Ok(agent) = Agent::parse(&agent) else {
-                eprintln!("[reason-network hook] unknown agent {agent}");
+                eprintln!("[crosstalk hook] unknown agent {agent}");
                 return Ok(());
             };
-            let mut input = String::new();
-            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
-            let output = reason_network::hook::run(&config, agent, &input).await;
+            // Read raw bytes: the payload is not guaranteed to be valid UTF-8
+            // (or free of a byte-order mark) on Windows.
+            let mut raw = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut raw);
+            let input = crosstalk::hook::decode_payload(&raw);
+            let output = crosstalk::hook::run(&config, agent, &input).await;
             if !output.is_empty() {
-                println!("{output}");
+                // A closed stdout must not turn into a panic (exit 101).
+                let mut stdout = std::io::stdout();
+                let _ = std::io::Write::write_all(&mut stdout, output.as_bytes());
+                let _ = std::io::Write::write_all(&mut stdout, b"\n");
+                let _ = std::io::Write::flush(&mut stdout);
             }
             Ok(())
         }
     }
 }
 
-/// `reason-network setup --agent <agent> [--dry-run]`.
+/// `crosstalk setup --agent <agent> [--dry-run]`.
 fn setup(selection: &str, dry_run: bool, pinned_dir: Option<PathBuf>, json: bool) -> Result<()> {
     let selected = Agent::parse_selection(selection)?;
     let host = agents::Host::from_env(pinned_dir)?;
@@ -1046,16 +1142,68 @@ fn setup(selection: &str, dry_run: bool, pinned_dir: Option<PathBuf>, json: bool
 fn service_spec(
     config: &Config,
     pinned_dir: &Option<PathBuf>,
-) -> Result<reason_network::service::ServiceSpec> {
+) -> Result<crosstalk::service::ServiceSpec> {
     let exe = agents::Host::from_env(None)?.exe;
-    Ok(reason_network::service::ServiceSpec::new(
+    Ok(crosstalk::service::ServiceSpec::new(
         config,
         exe,
         pinned_dir.is_some(),
     ))
 }
 
-/// `reason-network update [--check] [--version V] [--source S]`.
+/// `crosstalk dashboard [--no-open]`.
+///
+/// Confirms the daemon is reachable, then opens the local dashboard URL in the
+/// default browser. The dashboard itself is served by the running daemon.
+async fn dashboard_command(config: &Config, no_open: bool, json: bool) -> Result<()> {
+    // The daemon must be running for the dashboard to answer.
+    call(config, Method::Status, json!({})).await.map_err(|_| {
+        Error::DaemonUnavailable(
+            "the dashboard is served by the daemon; start it with `crosstalk service start` \
+or `crosstalk daemon-start`"
+                .into(),
+        )
+    })?;
+
+    let addr = config
+        .dashboard_addr
+        .clone()
+        .unwrap_or_else(|| crosstalk::config::DEFAULT_DASHBOARD_ADDR.to_string());
+    let url = format!("http://{addr}");
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&json!({ "url": url }))?);
+        return Ok(());
+    }
+
+    println!("dashboard: {url}");
+    if no_open {
+        return Ok(());
+    }
+    match open_in_browser(&url) {
+        Ok(()) => println!("opened in your default browser"),
+        Err(error) => println!("open it in your browser ({error})"),
+    }
+    Ok(())
+}
+
+/// Open a URL in the default browser, per platform.
+fn open_in_browser(url: &str) -> Result<()> {
+    #[cfg(windows)]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+
+    result
+        .map(|_| ())
+        .map_err(|error| Error::Other(error.to_string()))
+}
+
+/// `crosstalk update [--check] [--version V] [--source S]`.
 async fn update_command(
     config: &Config,
     check: bool,
@@ -1063,7 +1211,7 @@ async fn update_command(
     source: Option<String>,
     json: bool,
 ) -> Result<()> {
-    use reason_network::update::{self, Source, Version};
+    use crosstalk::update::{self, Source, Version};
     let source = match source {
         Some(source) => Source::parse(&source)?,
         None => Source::from_env()?,
@@ -1086,10 +1234,10 @@ async fn update_command(
             println!("available: {} ({})", found.available, found.target);
             println!("source:    {}", found.source);
             if found.update_available {
-                println!("an update is available: run `reason-network update`");
+                println!("an update is available: run `crosstalk update`");
             } else if wanted.is_some() {
                 println!(
-                    "install it with `reason-network update --version {}`",
+                    "install it with `crosstalk update --version {}`",
                     found.available
                 );
             } else {
@@ -1117,25 +1265,25 @@ async fn update_command(
         println!("previous executable kept at {previous}");
     }
     println!("configuration and data were not modified");
-    if reason_network::service::daemon_pid(&config.endpoint)
+    if crosstalk::service::daemon_pid(&config.endpoint)
         .await
         .is_some()
     {
         println!(
-            "the running daemon still uses the old version; restart it: `reason-network service stop` then `reason-network service start` (or restart `daemon-start`)"
+            "the running daemon still uses the old version; restart it: `crosstalk service stop` then `crosstalk service start` (or restart `daemon-start`)"
         );
     }
     Ok(())
 }
 
-/// `reason-network service <action>`.
+/// `crosstalk service <action>`.
 async fn service_command(
     config: &Config,
     pinned_dir: &Option<PathBuf>,
     action: ServiceAction,
     json: bool,
 ) -> Result<()> {
-    use reason_network::service;
+    use crosstalk::service;
     let mut spec = service_spec(config, pinned_dir)?;
     let message = match action {
         ServiceAction::Install => service::install(&spec)?,
@@ -1218,7 +1366,7 @@ async fn call(config: &Config, method: Method, params: Value) -> Result<Value> {
         method,
         params,
     };
-    let response: reason_network::protocol::Response =
+    let response: crosstalk::protocol::Response =
         ipc::request_once(&config.endpoint, &request).await?;
     match (response.ok, response.result, response.error) {
         (true, Some(result), _) => Ok(result),
@@ -1235,7 +1383,7 @@ fn resolve_session(session: Option<String>) -> Result<String> {
         .filter(|key| !key.is_empty())
         .ok_or_else(|| {
             Error::InvalidRequest(
-                "no session key: pass --session or set REASON_NETWORK_SESSION_KEY".into(),
+                "no session key: pass --session or set CROSSTALK_SESSION_KEY".into(),
             )
         })
 }
@@ -1277,8 +1425,7 @@ mod tests {
     #[test]
     fn update_accepts_a_version_flag() {
         let cli =
-            Cli::try_parse_from(["reason-network", "update", "--check", "--version", "0.2.0"])
-                .unwrap();
+            Cli::try_parse_from(["crosstalk", "update", "--check", "--version", "0.2.0"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Update { check: true, target_version: Some(ref v), .. } if v == "0.2.0"

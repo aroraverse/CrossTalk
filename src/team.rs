@@ -24,11 +24,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// Signature domain for membership records. Changing it invalidates old records.
-pub const MEMBERSHIP_DOMAIN: &str = "reason-network/membership/v1";
+pub const MEMBERSHIP_DOMAIN: &str = "crosstalk/membership/v1";
 /// Signature domain for revocations.
-pub const REVOCATION_DOMAIN: &str = "reason-network/revocation/v1";
+pub const REVOCATION_DOMAIN: &str = "crosstalk/revocation/v1";
 /// Signature domain for invitations.
-pub const INVITE_DOMAIN: &str = "reason-network/invite/v1";
+pub const INVITE_DOMAIN: &str = "crosstalk/invite/v1";
 /// Prefix of an encoded invitation token.
 pub const INVITE_TOKEN_PREFIX: &str = "rn1";
 
@@ -263,7 +263,7 @@ impl Invitation {
         let body = token
             .strip_prefix(INVITE_TOKEN_PREFIX)
             .and_then(|rest| rest.strip_prefix(':'))
-            .ok_or_else(|| Error::InvalidRequest("not a reason-network invitation".into()))?;
+            .ok_or_else(|| Error::InvalidRequest("not a crosstalk invitation".into()))?;
         let bytes = BASE64URL_NOPAD
             .decode(body.as_bytes())
             .map_err(|error| Error::InvalidRequest(format!("damaged invitation token: {error}")))?;

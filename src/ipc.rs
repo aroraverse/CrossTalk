@@ -1,6 +1,6 @@
 //! Local IPC transport.
 //!
-//! * Windows: named pipes (`\\.\pipe\reason-network-<hash>`).
+//! * Windows: named pipes (`\\.\pipe\crosstalk-<hash>`).
 //! * Unix: domain sockets inside the data directory.
 //!
 //! The wire format is newline-delimited JSON: one request object per line,
@@ -196,19 +196,21 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
                 .open(name)
                 .map_err(|error| {
                     Error::DaemonUnavailable(format!(
-                        "cannot reach daemon at {name}: {error} (is `reason-network daemon-start` running?)"
+                        "cannot reach daemon at {name}: {error} (is `crosstalk daemon-start` running?)"
                     ))
                 })?;
             Ok(Connection::new(Box::new(client)))
         }
         #[cfg(unix)]
         Endpoint::UnixSocket(path) => {
-            let stream = tokio::net::UnixStream::connect(path).await.map_err(|error| {
-                Error::DaemonUnavailable(format!(
-                    "cannot reach daemon at {}: {error} (is `reason-network daemon-start` running?)",
-                    path.display()
-                ))
-            })?;
+            let stream = tokio::net::UnixStream::connect(path)
+                .await
+                .map_err(|error| {
+                    Error::DaemonUnavailable(format!(
+                        "cannot reach daemon at {}: {error} (is `crosstalk daemon-start` running?)",
+                        path.display()
+                    ))
+                })?;
             Ok(Connection::new(Box::new(stream)))
         }
     }

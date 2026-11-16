@@ -4,7 +4,7 @@
 //! `PROTOCOL_VERSION` or a frame shape is a breaking change and requires a new
 //! ALPN string.
 //!
-//! * ALPN: `reason-network/1`
+//! * ALPN: `crosstalk/1`
 //! * Protocol version: `1`
 //! * Framing: one JSON object per line (`\n`), maximum 64 KiB per frame.
 //! * Envelope: `{"v":1,"body":{"type":"<frame>",...}}`
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::team::{Invitation, MembershipRecord, RevocationRecord};
 
 /// ALPN protocol identifier for M1. Frozen.
-pub const ALPN: &[u8] = b"reason-network/1";
+pub const ALPN: &[u8] = b"crosstalk/1";
 
 /// Wire protocol version carried in every frame. Frozen.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -134,6 +134,9 @@ pub struct SessionInfo {
     pub activity: String,
     /// Last seen time on the owner's clock.
     pub last_seen: i64,
+    /// Repository the session works in (optional; absent from older peers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 /// `presence` frame.
@@ -170,6 +173,12 @@ pub struct MsgFrame {
     pub body: String,
     /// Creation time on the sender's clock.
     pub created_at: i64,
+    /// Id of the message this one replies to (optional; absent from older peers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// Conversation thread id (optional; absent from older peers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 /// `ack` frame.
@@ -302,6 +311,8 @@ mod tests {
             recipient_session: "b".into(),
             body: "hi".into(),
             created_at: 1,
+            reply_to: None,
+            thread_id: None,
         }));
         let line = serde_json::to_string(&frame).unwrap();
         assert!(line.contains("\"type\":\"msg\""));
@@ -318,6 +329,8 @@ mod tests {
             recipient_session: "b".into(),
             body: "x".repeat(MAX_FRAME_BYTES),
             created_at: 1,
+            reply_to: None,
+            thread_id: None,
         };
         assert!(frame.validate().is_err());
     }
@@ -330,6 +343,8 @@ mod tests {
             recipient_session: "b".into(),
             body: "   ".into(),
             created_at: 1,
+            reply_to: None,
+            thread_id: None,
         };
         assert!(frame.validate().is_err());
     }

@@ -87,7 +87,7 @@ jobs:
         run: python -m unittest discover -s scripts -p "test_*.py" -v
       - name: install.ps1 tests (PowerShell 7)
         shell: pwsh
-        run: ./scripts/test_install.ps1 -Binary target/debug/reason-network.exe
+        run: ./scripts/test_install.ps1 -Binary target/debug/crosstalk.exe
       - name: install.ps1 tests (Windows PowerShell 5.1)
         shell: powershell
-        run: ./scripts/test_install.ps1 -Binary target/debug/reason-network.exe
+        run: ./scripts/test_install.ps1 -Binary target/debug/crosstalk.exe

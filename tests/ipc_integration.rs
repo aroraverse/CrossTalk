@@ -3,8 +3,8 @@
 
 mod common;
 
-use reason_network::ipc;
-use reason_network::protocol::{Method, Request, Response};
+use crosstalk::ipc;
+use crosstalk::protocol::{Method, Request, Response};
 use serde_json::json;
 
 use common::TestDaemon;
@@ -13,7 +13,7 @@ use common::TestDaemon;
 async fn daemon_answers_status_over_ipc() {
     let daemon = TestDaemon::start().await;
     let status = daemon.call(Method::Status, json!({})).await.unwrap();
-    assert_eq!(status["daemon"], "reason-network");
+    assert_eq!(status["daemon"], "crosstalk");
     assert!(status["pid"].as_u64().is_some());
     // A named pipe on Windows, `<data dir>/daemon.sock` on Unix.
     assert_eq!(
@@ -34,7 +34,7 @@ async fn sessions_register_and_are_discoverable() {
                 "name": "alice",
                 "agent_type": "codex",
                 "working_dir": "C:/work/alice",
-                "repo": "reason-network",
+                "repo": "crosstalk",
                 "branch": "main",
                 "status": "busy",
                 "activity": "writing tests",
@@ -270,7 +270,7 @@ async fn malformed_input_does_not_stop_the_daemon() {
 
     // The daemon still answers afterwards.
     let status = daemon.call(Method::Status, json!({})).await.unwrap();
-    assert_eq!(status["daemon"], "reason-network");
+    assert_eq!(status["daemon"], "crosstalk");
 }
 
 #[tokio::test]

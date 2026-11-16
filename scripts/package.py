@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Build Reason Network release artifacts (standard library only).
+"""Build Crosstalk release artifacts (standard library only).
 
     python scripts/package.py package --binary PATH --target TRIPLE [--version X.Y.Z] [--out dist]
     python scripts/package.py sums [--out dist]
 
 `package` writes, for one target:
 
-    reason-network-<version>-<target>.zip|.tar.gz   executable + README.md + INSTALL.md + VERSION
-    reason-network-<version>-<target>[.exe]          bare executable, used by `reason-network update`
+    crosstalk-<version>-<target>.zip|.tar.gz   executable + README.md + INSTALL.md + VERSION
+    crosstalk-<version>-<target>[.exe]          bare executable, used by `crosstalk update`
 
 `sums` writes SHA256SUMS (sha256sum format) for every release file in the
 output directory, including the installer scripts.
@@ -29,7 +29,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-PRODUCT = "reason-network"
+PRODUCT = "crosstalk"
 ROOT = Path(__file__).resolve().parent.parent
 TARGETS = (
     "x86_64-pc-windows-msvc",

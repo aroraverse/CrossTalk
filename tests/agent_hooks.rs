@@ -6,11 +6,11 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use reason_network::agents::{self, Agent, Host};
-use reason_network::doctor::{self, Level};
-use reason_network::hook::{self, HookEvent};
-use reason_network::protocol::Method;
-use reason_network::service::ServiceSpec;
+use crosstalk::agents::{self, Agent, Host};
+use crosstalk::doctor::{self, Level};
+use crosstalk::hook::{self, HookEvent};
+use crosstalk::protocol::Method;
+use crosstalk::service::ServiceSpec;
 use serde_json::{Value, json};
 
 use common::TestDaemon;
@@ -92,7 +92,7 @@ async fn hooks_track_the_session_lifecycle() {
 }
 
 #[tokio::test]
-async fn hooks_announce_unread_messages_without_consuming_them() {
+async fn hooks_claim_and_deliver_unread_messages_once() {
     let daemon = TestDaemon::start().await;
     let (_dir, repo) = workspace();
     let endpoint = &daemon.config.endpoint;
@@ -121,19 +121,29 @@ async fn hooks_announce_unread_messages_without_consuming_them() {
     let output = hook::handle(endpoint, Agent::Claude, &event("UserPromptSubmit", &repo))
         .await
         .unwrap();
-    assert!(output.contains("1 unread message"), "{output}");
-    assert!(output.contains("from alice"), "{output}");
+    assert!(output.contains("1 new message"), "{output}");
+    assert!(output.contains("agent session `alice`"), "{output}");
+    assert!(output.contains("UNTRUSTED"), "{output}");
     assert!(
-        !output.contains("please review"),
-        "the body is read via check_inbox"
+        output.contains("please review"),
+        "the body is delivered as fenced, untrusted context: {output}"
     );
 
-    // Still unread: the hook only announces.
+    // Claimed, not merely announced: the message is marked read so a later
+    // hook invocation never hands it over a second time.
     let unread = daemon
         .call(Method::UnreadCount, json!({ "session_key": key }))
         .await
         .unwrap();
-    assert_eq!(unread["unread"], 1);
+    assert_eq!(unread["unread"], 0);
+
+    let again = hook::handle(endpoint, Agent::Claude, &event("UserPromptSubmit", &repo))
+        .await
+        .unwrap();
+    assert!(
+        again.is_empty(),
+        "the message must not be delivered twice: {again}"
+    );
 }
 
 #[tokio::test]
@@ -184,13 +194,13 @@ async fn mcp_server_and_hooks_share_one_identity() {
     .await
     .unwrap();
 
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_reason-network"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_crosstalk"))
         .args(["mcp", "--agent", "codex"])
         .current_dir(&repo)
-        .env("REASON_NETWORK_DATA_DIR", daemon.data_dir())
-        .env("REASON_NETWORK_NET", "0")
-        .env_remove("REASON_NETWORK_SESSION_KEY")
-        .env_remove("REASON_NETWORK_SESSION_NAME")
+        .env("CROSSTALK_DATA_DIR", daemon.data_dir())
+        .env("CROSSTALK_NET", "0")
+        .env_remove("CROSSTALK_SESSION_KEY")
+        .env_remove("CROSSTALK_SESSION_NAME")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -209,12 +219,12 @@ async fn mcp_server_and_hooks_share_one_identity() {
 
     // Without hooks, the MCP server registers the derived session itself.
     let other = tempfile::tempdir().unwrap();
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_reason-network"))
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_crosstalk"))
         .args(["mcp", "--agent", "codex"])
         .current_dir(other.path())
-        .env("REASON_NETWORK_DATA_DIR", daemon.data_dir())
-        .env_remove("REASON_NETWORK_SESSION_KEY")
-        .env_remove("REASON_NETWORK_SESSION_NAME")
+        .env("CROSSTALK_DATA_DIR", daemon.data_dir())
+        .env_remove("CROSSTALK_SESSION_KEY")
+        .env_remove("CROSSTALK_SESSION_NAME")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -240,8 +250,7 @@ async fn mcp_server_and_hooks_share_one_identity() {
 #[test]
 fn explicit_session_keys_still_win() {
     assert_eq!(
-        reason_network::mcp::resolve_session_key(Some("agent-mcp".into()), Some(Agent::Claude))
-            .unwrap(),
+        crosstalk::mcp::resolve_session_key(Some("agent-mcp".into()), Some(Agent::Claude)).unwrap(),
         "agent-mcp"
     );
 }
@@ -258,7 +267,7 @@ fn fake_host(data_dir: &Path, with_claude: bool) -> (tempfile::TempDir, Host) {
         };
         std::fs::write(bin.join(name), "").unwrap();
     }
-    let exe = PathBuf::from(env!("CARGO_BIN_EXE_reason-network"));
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_crosstalk"));
     let host = Host {
         home: dir.path().join("home"),
         path: vec![bin, exe.parent().unwrap().to_path_buf()],
@@ -308,7 +317,7 @@ async fn doctor_reports_daemon_and_configuration_state() {
     assert_eq!(config.level, Level::Warn, "{config:?}");
     assert_eq!(
         config.fix.as_deref(),
-        Some("reason-network setup --agent claude")
+        Some("crosstalk setup --agent claude")
     );
     assert_eq!(find(&checks, "service").level, Level::Ok);
 
@@ -327,7 +336,7 @@ async fn doctor_reports_daemon_and_configuration_state() {
     let path = host.claude_json();
     let mut claude: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     claude["projects"] = json!({
-        "/work/app": { "mcpServers": { "reason-network": { "command": "old" } } }
+        "/work/app": { "mcpServers": { "crosstalk": { "command": "old" } } }
     });
     std::fs::write(&path, claude.to_string()).unwrap();
     let checks = doctor::run(&daemon.config, &host, &spec).await;
@@ -360,7 +369,7 @@ async fn doctor_flags_a_configuration_pointing_at_a_missing_executable() {
     let daemon = TestDaemon::start().await;
     let (_home, mut host) = fake_host(daemon.data_dir(), true);
     let real = host.exe.clone();
-    host.exe = host.home.join("gone").join("reason-network");
+    host.exe = host.home.join("gone").join("crosstalk");
     agents::run_setup(&host, &[Agent::Claude], false)
         .into_result()
         .unwrap();

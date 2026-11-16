@@ -1,4 +1,4 @@
-//! Reason Network — peer-to-peer messaging for AI coding agents.
+//! Crosstalk — peer-to-peer messaging for AI coding agents.
 //!
 //! Milestone 0 built the local foundation (daemon, SQLite, IPC, CLI, MCP).
 //! Milestone 1 adds encrypted machine-to-machine team networking on iroh.
@@ -12,6 +12,7 @@
 //! * [`store`] — the SQLite owner of all application state.
 //! * [`ipc`] — local transport (Windows named pipes / Unix domain sockets).
 //! * [`daemon`] — the single owner of state; dispatches requests.
+//! * [`dashboard`] — the local web UI, a thin HTTP client of the daemon.
 //! * [`delivery`] — optional push delivery into a live agent context.
 //! * [`mcp`] — a thin MCP server that speaks to the daemon over IPC.
 //! * [`identity`] — the persistent machine key and peer id.
@@ -27,6 +28,7 @@
 pub mod agents;
 pub mod config;
 pub mod daemon;
+pub mod dashboard;
 pub mod delivery;
 pub mod doctor;
 pub mod error;
@@ -36,6 +38,8 @@ pub mod ipc;
 pub mod mcp;
 pub mod net;
 pub mod protocol;
+pub mod resolve;
+pub mod runner;
 pub mod service;
 pub mod store;
 pub mod team;

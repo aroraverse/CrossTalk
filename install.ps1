@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Reason Network installer for Windows.
+    Crosstalk installer for Windows.
 
 .DESCRIPTION
     Downloads (or takes from a local directory) the release package for this
     machine, verifies it against the release's SHA256SUMS, and installs
-    reason-network.exe to a user-writable directory. Configuration and
+    crosstalk.exe to a user-writable directory. Configuration and
     application data are never modified by an install or upgrade. No
     administrator rights are needed.
 
@@ -13,13 +13,13 @@
     Install this version (default: the latest release).
 
 .PARAMETER InstallDir
-    Where to put reason-network.exe (default: %LOCALAPPDATA%\Programs\reason-network).
+    Where to put crosstalk.exe (default: %LOCALAPPDATA%\Programs\crosstalk).
 
 .PARAMETER FromDir
     Install from a local directory holding SHA256SUMS and the release packages.
 
 .PARAMETER Repo
-    GitHub repository to download from, OWNER/NAME (default: $env:REASON_NETWORK_REPO).
+    GitHub repository to download from, OWNER/NAME (default: $env:CROSSTALK_REPO).
 
 .PARAMETER Target
     Override platform detection (testing).
@@ -34,7 +34,7 @@
     With -Uninstall: also delete the data directory.
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File install.ps1 -Repo owner/reason-network
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Repo owner/crosstalk
 
 .EXAMPLE
     .\install.ps1 -FromDir .\dist -AddToPath
@@ -44,7 +44,7 @@ param(
     [string]$Version = "",
     [string]$InstallDir = "",
     [string]$FromDir = "",
-    [string]$Repo = $env:REASON_NETWORK_REPO,
+    [string]$Repo = $env:CROSSTALK_REPO,
     [string]$Target = "",
     [switch]$AddToPath,
     [switch]$Uninstall,
@@ -55,7 +55,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$Product = "reason-network"
+$Product = "crosstalk"
 $SupportedTargets = @("x86_64-pc-windows-msvc")
 
 function Fail([string]$Message) {
@@ -65,7 +65,7 @@ function Fail([string]$Message) {
 }
 
 function Get-DataDir {
-    if ($env:REASON_NETWORK_DATA_DIR) { return $env:REASON_NETWORK_DATA_DIR }
+    if ($env:CROSSTALK_DATA_DIR) { return $env:CROSSTALK_DATA_DIR }
     return (Join-Path $env:APPDATA $Product)
 }
 
@@ -77,8 +77,8 @@ function Test-OnUserPath([string]$Dir) {
 }
 
 if (-not $InstallDir) {
-    if ($env:REASON_NETWORK_INSTALL_DIR) {
-        $InstallDir = $env:REASON_NETWORK_INSTALL_DIR
+    if ($env:CROSSTALK_INSTALL_DIR) {
+        $InstallDir = $env:CROSSTALK_INSTALL_DIR
     } else {
         $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$Product"
     }
@@ -91,7 +91,7 @@ if ($Uninstall) {
         # Stop and unregister the background service; this never deletes data.
         & $Exe service uninstall
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "could not remove the background service; remove the ReasonNetwork task in Task Scheduler if it exists"
+            Write-Warning "could not remove the background service; remove the Crosstalk task in Task Scheduler if it exists"
         }
         Remove-Item -LiteralPath $Exe -Force
         Get-ChildItem -LiteralPath $InstallDir -Filter "$Product.exe.old*" -ErrorAction SilentlyContinue |
@@ -119,8 +119,8 @@ if ($Uninstall) {
         Write-Output "data directory kept: $data (pass -PurgeData to delete it)"
     }
     Write-Output "agent configurations may still list the MCP server; remove it with"
-    Write-Output "  claude mcp remove reason-network --scope user"
-    Write-Output "  codex mcp remove reason-network"
+    Write-Output "  claude mcp remove crosstalk --scope user"
+    Write-Output "  codex mcp remove crosstalk"
     return
 }
 if ($PurgeData) { Fail "-PurgeData is only valid with -Uninstall" }
@@ -139,7 +139,7 @@ if ($SupportedTargets -notcontains $Target) { Fail "unsupported target $Target (
 
 # ------------------------------------------------------------------- source
 if (-not $FromDir) {
-    if (-not $Repo) { Fail "no repository given: pass -Repo OWNER/NAME or set REASON_NETWORK_REPO (or use -FromDir)" }
+    if (-not $Repo) { Fail "no repository given: pass -Repo OWNER/NAME or set CROSSTALK_REPO (or use -FromDir)" }
     if ($Repo -notmatch '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$') { Fail "-Repo must look like OWNER/NAME" }
     # Windows PowerShell 5.1 defaults to TLS 1.0.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12

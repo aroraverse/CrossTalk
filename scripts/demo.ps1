@@ -6,13 +6,13 @@
 .DESCRIPTION
     pwsh -File scripts/demo.ps1
 
-    Uses the debug build at target\debug\reason-network.exe (the release build
+    Uses the debug build at target\debug\crosstalk.exe (the release build
     may be quarantined by Windows Defender — see INSTALL.md troubleshooting).
     Everything runs in temporary directories; the user's real data is never
     touched. The script cleans up its processes and temp dirs on exit.
 
 .PARAMETER Binary
-    Path to the reason-network executable. Defaults to target\debug\reason-network.exe.
+    Path to the crosstalk executable. Defaults to target\debug\crosstalk.exe.
 #>
 param(
     [string]$Binary = ""
@@ -24,7 +24,7 @@ $ErrorActionPreference = "Stop"
 # ── resolve binary ──────────────────────────────────────────────────────────
 $Root = Split-Path -Parent $PSScriptRoot
 if (-not $Binary) {
-    $Binary = Join-Path $Root "target\debug\reason-network.exe"
+    $Binary = Join-Path $Root "target\debug\crosstalk.exe"
 }
 if (-not (Test-Path $Binary)) {
     Write-Host "ERROR: binary not found at $Binary" -ForegroundColor Red
@@ -40,7 +40,7 @@ try {
     Write-Host "Use the debug build (cargo build) or see INSTALL.md troubleshooting."
     exit 1
 }
-Write-Host "`n=== Reason Network Hackathon Demo ===" -ForegroundColor Cyan
+Write-Host "`n=== Crosstalk Hackathon Demo ===" -ForegroundColor Cyan
 Write-Host "Binary: $Binary ($ver)`n"
 
 # ── temp dirs ───────────────────────────────────────────────────────────────
@@ -66,10 +66,10 @@ function Step($label) { Write-Host "`n>>> $label" -ForegroundColor Green }
 
 function Rn {
     param([string]$dir, [string[]]$cmdArgs)
-    $env:REASON_NETWORK_DATA_DIR = $dir
+    $env:CROSSTALK_DATA_DIR = $dir
     $output = & $Binary @cmdArgs 2>&1 | Out-String
     $code = $LASTEXITCODE
-    $env:REASON_NETWORK_DATA_DIR = $null
+    $env:CROSSTALK_DATA_DIR = $null
     return @{ Output = $output.Trim(); Exit = $code }
 }
 
@@ -78,7 +78,7 @@ function RnExpect {
     $r = Rn -dir $dir -cmdArgs $cmdArgs
     if ($r.Exit -ne 0 -or ($expect -and $r.Output -notmatch $expect)) {
         Write-Host "FAIL: $label" -ForegroundColor Red
-        Write-Host "  Command: reason-network $($cmdArgs -join ' ')"
+        Write-Host "  Command: crosstalk $($cmdArgs -join ' ')"
         Write-Host "  Exit: $($r.Exit)"
         Write-Host "  Output: $($r.Output)"
         & $Cleanup
@@ -92,7 +92,7 @@ function StartDaemon($name, $dir) {
     $logDir = Join-Path $dir "logs"
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     $psi = [System.Diagnostics.ProcessStartInfo]::new($Binary, "daemon-start")
-    $psi.Environment["REASON_NETWORK_DATA_DIR"] = $dir
+    $psi.Environment["CROSSTALK_DATA_DIR"] = $dir
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -210,7 +210,7 @@ Write-Host $outboxAfter.Output
 # Restart daemon B
 Write-Host "  Restarting daemon B..."
 $psi = [System.Diagnostics.ProcessStartInfo]::new($Binary, "daemon-start")
-$psi.Environment["REASON_NETWORK_DATA_DIR"] = $DirB
+$psi.Environment["CROSSTALK_DATA_DIR"] = $DirB
 $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
@@ -223,15 +223,15 @@ Write-Host "  Daemon B restarted (pid $($p.Id))"
 # explicitly so A finds B's new network address faster.
 Start-Sleep -Seconds 3
 try {
-    $env:REASON_NETWORK_DATA_DIR = $DirB
+    $env:CROSSTALK_DATA_DIR = $DirB
     $bInfoRaw = (& $Binary machine-id --json 2>&1) | Out-String
     $bAddrJson = ($bInfoRaw | ConvertFrom-Json).addr | ConvertTo-Json -Depth 10 -Compress
-    $env:REASON_NETWORK_DATA_DIR = $DirA
+    $env:CROSSTALK_DATA_DIR = $DirA
     $pcResult = & $Binary peer-connect --addr $bAddrJson 2>&1
-    $env:REASON_NETWORK_DATA_DIR = $null
+    $env:CROSSTALK_DATA_DIR = $null
     Write-Host "  Reconnected A to B ($pcResult)"
 } catch {
-    $env:REASON_NETWORK_DATA_DIR = $null
+    $env:CROSSTALK_DATA_DIR = $null
     Write-Host "  Explicit reconnect skipped; relying on relay rediscovery ($($_.Exception.Message))" -ForegroundColor Yellow
 }
 

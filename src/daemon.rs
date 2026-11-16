@@ -20,12 +20,15 @@ use crate::identity::MachineIdentity;
 use crate::ipc::{Connection, Listener};
 use crate::net::{NetOptions, Network, NetworkDeps, NetworkEvent};
 use crate::protocol::{
-    AnswerQuestionParams, AskUserParams, InboxParams, ListQuestionsParams, MarkReadParams, Method,
-    NetConnectParams, RegisterParams, Request, Response, SendMessageParams, SessionKeyParams,
+    AnswerQuestionParams, AskUserParams, ClaimMessagesParams, ConversationParams,
+    ConversationsParams, FileOverlapsParams, GetMessageParams, InboxParams, ListQuestionsParams,
+    MarkReadParams, Method, NetConnectParams, RecordFileActivityParams, RegisterParams, Request,
+    ResolveRecipientParams, Response, SearchMessagesParams, SendMessageParams, SessionKeyParams,
     TeamCreateParams, TeamInviteParams, TeamJoinParams, TeamLeaveParams, TeamMembersParams,
-    TeamRevokeParams, UpdateParams,
+    TeamRevokeParams, UpdateParams, WaitReplyParams,
 };
-use crate::store::{Message, Store};
+use crate::resolve::{self, Candidate};
+use crate::store::{FileActivity, Message, Store};
 
 /// Version reported by the daemon.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,6 +109,8 @@ pub struct Daemon {
     network_events: Mutex<Option<mpsc::UnboundedReceiver<NetworkEvent>>>,
     /// One entry per peer being reconnected.
     reconnect: Mutex<HashMap<String, ReconnectState>>,
+    /// The address the dashboard HTTP server actually bound to, once serving.
+    dashboard_addr: Mutex<Option<std::net::SocketAddr>>,
 }
 
 impl Daemon {
@@ -131,6 +136,7 @@ impl Daemon {
             network: Mutex::new(None),
             network_events: Mutex::new(None),
             reconnect: Mutex::new(HashMap::new()),
+            dashboard_addr: Mutex::new(None),
         }))
     }
 
@@ -149,13 +155,21 @@ impl Daemon {
         &self.config
     }
 
+    /// The address the dashboard HTTP server bound to, once it is serving.
+    pub fn dashboard_addr(&self) -> Option<std::net::SocketAddr> {
+        *self
+            .dashboard_addr
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
     /// Run the daemon until it is asked to stop.
     pub async fn serve(self: Arc<Self>) -> Result<()> {
         let mut listener = Listener::bind(&self.config.endpoint)?;
         let mut shutdown = self.shutdown.subscribe();
 
         eprintln!(
-            "reason-network daemon {VERSION} listening on {}",
+            "crosstalk daemon {VERSION} listening on {}",
             self.config.endpoint.display()
         );
         eprintln!("  data directory: {}", self.config.data_dir.display());
@@ -181,6 +195,7 @@ impl Daemon {
         };
 
         let net_worker = self.start_network().await;
+        let dashboard_worker = self.start_dashboard().await;
 
         loop {
             tokio::select! {
@@ -195,11 +210,14 @@ impl Daemon {
             }
         }
 
-        eprintln!("reason-network daemon stopped");
+        eprintln!("crosstalk daemon stopped");
         if let Some(worker) = worker {
             worker.abort();
         }
         if let Some(worker) = net_worker {
+            worker.abort();
+        }
+        if let Some(worker) = dashboard_worker {
             worker.abort();
         }
         if let Some(network) = self
@@ -255,6 +273,36 @@ impl Daemon {
             .take();
 
         receiver.map(|receiver| tokio::spawn(Arc::clone(self).net_worker(receiver)))
+    }
+
+    /// Bind the local web dashboard and start serving it.
+    ///
+    /// Loopback-only HTTP. A failure to bind (for example the port is already
+    /// taken by another daemon) is logged and the daemon keeps running without
+    /// the dashboard.
+    async fn start_dashboard(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        let Some(addr) = self.config.dashboard_addr.clone() else {
+            eprintln!("  dashboard: disabled");
+            return None;
+        };
+        match crate::dashboard::bind(&addr).await {
+            Ok((listener, local)) => {
+                eprintln!("  dashboard: http://{local}");
+                *self
+                    .dashboard_addr
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(local);
+                let daemon = Arc::clone(self);
+                Some(tokio::spawn(crate::dashboard::serve(daemon, listener)))
+            }
+            Err(error) => {
+                eprintln!(
+                    "  dashboard: unavailable ({error}) — set {} to change the address",
+                    crate::config::ENV_DASHBOARD_ADDR
+                );
+                None
+            }
+        }
     }
 
     /// The network node, when networking is running.
@@ -371,7 +419,7 @@ impl Daemon {
             Method::ListQuestions => {
                 let params: ListQuestionsParams = parse_params(params)?;
                 let questions =
-                    self.with_store(|store| store.list_questions(params.status.as_deref()))?;
+                    self.with_store(|store| store.question_view(params.status.as_deref()))?;
                 Ok(json!({ "questions": questions }))
             }
             Method::AnswerQuestion => {
@@ -525,11 +573,268 @@ impl Daemon {
                 let messages = self.with_store(|store| store.list_outbound(100))?;
                 Ok(json!({ "messages": messages }))
             }
+            Method::SearchMessages => {
+                let params: SearchMessagesParams = parse_params(params)?;
+                if params.context.unwrap_or(false) {
+                    let hits = self.with_store(|store| {
+                        store.search_view(
+                            &params.query,
+                            params.session_key.as_deref(),
+                            params.sender.as_deref(),
+                            params.since,
+                            params.limit.unwrap_or(100),
+                        )
+                    })?;
+                    return Ok(json!({ "messages": hits }));
+                }
+                let messages = self.with_store(|store| {
+                    store.search_messages(
+                        &params.query,
+                        params.session_key.as_deref(),
+                        params.limit.unwrap_or(100),
+                    )
+                })?;
+                Ok(json!({ "messages": messages }))
+            }
+            Method::Conversation => {
+                let params: ConversationParams = parse_params(params)?;
+                let messages = self.with_store(|store| {
+                    store.conversation_view(
+                        &params.session_key,
+                        &params.with,
+                        params.limit.unwrap_or(500),
+                    )
+                })?;
+                Ok(json!({ "messages": messages }))
+            }
+            Method::Conversations => {
+                let params: ConversationsParams = parse_params(params)?;
+                let threads =
+                    self.with_store(|store| store.conversation_partners(&params.session_key))?;
+                Ok(json!({ "conversations": threads }))
+            }
+            Method::RecordFileActivity => {
+                let params: RecordFileActivityParams = parse_params(params)?;
+                let activity = FileActivity {
+                    session_key: params.session_key,
+                    repo: params.repo,
+                    path: params.path,
+                    action: params.action.unwrap_or_else(|| "edit".to_string()),
+                    updated_at: crate::store::now_seconds(),
+                };
+                self.with_store(|store| store.record_file_activity(&activity))?;
+                let overlaps = self.with_store(|store| store.file_overlaps(900))?;
+                Ok(json!({ "recorded": true, "overlaps": overlaps }))
+            }
+            Method::FileOverlaps => {
+                let params: FileOverlapsParams = parse_params(params)?;
+                let overlaps = self.with_store(|store| {
+                    store.file_overlaps(params.window_seconds.unwrap_or(900))
+                })?;
+                Ok(json!({ "overlaps": overlaps }))
+            }
+            Method::Overview => self.overview(),
+            Method::SendAsHuman => {
+                let params: crate::protocol::SendAsHumanParams = parse_params(params)?;
+                let message = self.with_store(|store| {
+                    store.send_as_human(
+                        &params.recipient_key,
+                        &params.body,
+                        params.reply_to.as_deref(),
+                    )
+                })?;
+                self.notify.notify_one();
+                Ok(message_with_delivery(&message, "local", None))
+            }
+            Method::AllConversations => {
+                let pairs = self.with_store(|store| store.conversation_pairs(200))?;
+                Ok(json!({ "conversations": pairs }))
+            }
+            Method::SetupStatus => self.setup_report(None),
+            Method::SetupApply => {
+                let params: crate::protocol::SetupApplyParams = parse_params(params)?;
+                let agent = crate::agents::Agent::parse(&params.agent)?;
+                self.setup_report(Some(agent))
+            }
+            Method::ResolveRecipient => {
+                let params: ResolveRecipientParams = parse_params(params)?;
+                let (candidate, scope) =
+                    self.resolve_recipient(params.session_key.as_deref(), &params.selector)?;
+                Ok(json!({ "session": candidate, "matched_by": scope }))
+            }
+            Method::WaitReply => {
+                let params: WaitReplyParams = parse_params(params)?;
+                self.wait_reply(params).await
+            }
+            Method::ClaimMessages => {
+                let params: ClaimMessagesParams = parse_params(params)?;
+                let messages = self.with_store(|store| {
+                    let limit = params.limit.unwrap_or(5).clamp(1, 50);
+                    let messages = store.inbox(InboxParams {
+                        session_key: params.session_key.clone(),
+                        limit: Some(limit),
+                        unread_only: Some(true),
+                    })?;
+                    let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+                    if !ids.is_empty() {
+                        store.mark_read(MarkReadParams {
+                            session_key: params.session_key.clone(),
+                            message_ids: Some(ids),
+                        })?;
+                    }
+                    store.touch(&params.session_key)?;
+                    Ok(messages)
+                })?;
+                let remaining = self.with_store(|store| store.unread_count(&params.session_key))?;
+                Ok(json!({ "messages": messages, "remaining_unread": remaining }))
+            }
+            Method::GetMessage => {
+                let params: GetMessageParams = parse_params(params)?;
+                let message = self
+                    .with_store(|store| store.get_message(&params.message_id))?
+                    .ok_or_else(|| Error::NotFound(format!("message {}", params.message_id)))?;
+                Ok(serde_json::to_value(message)?)
+            }
+            Method::AnchorStatus => self.anchor_status(),
+            Method::SetAnchor => {
+                let params: crate::protocol::SetAnchorParams = parse_params(params)?;
+                self.with_store(|store| {
+                    store.meta_set("anchor", if params.enabled { "1" } else { "0" })
+                })?;
+                self.anchor_status()
+            }
+        }
+    }
+
+    /// The anchor role of this machine.
+    ///
+    /// An anchor is a machine designated to stay on (through the background
+    /// service) so the team always has one member holding the shared message
+    /// history and able to receive mail while others are offline. The messages
+    /// themselves are already persisted by the store and retried by the
+    /// network worker; the anchor flag records the intent and lets the
+    /// dashboard and `doctor` point at the machine the team can rely on.
+    fn anchor_status(&self) -> Result<Value> {
+        let enabled = self
+            .with_store(|store| store.meta_get("anchor"))?
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        let (sessions, messages) = self.with_store(|store| store.counts())?;
+        // The service keeps the daemon alive at login; report whether it is
+        // installed so users know the anchor will actually stay on.
+        Ok(json!({
+            "anchor": enabled,
+            "peer_id": self.peer_id(),
+            "messages_retained": messages,
+            "sessions": sessions,
+            "note": if enabled {
+                "this machine is the team anchor: it retains team history and receives mail while \
+        other machines are offline. Keep the background service installed so it stays on."
+            } else {
+                "this machine is not an anchor. Designate one always-on machine as the anchor so \
+        the team keeps a mailbox and searchable history when others are offline."
+            },
+        }))
+    }
+
+    /// A single aggregated snapshot for the dashboard: status, teams, peers,
+    /// the session directory, recent outbound messages and file overlaps. One
+    /// call keeps the dashboard's polling cheap.
+    fn overview(&self) -> Result<Value> {
+        let status = self.status()?;
+        let net = self.net_info()?;
+        let directory = self.directory()?;
+        let teams = self.execute_sync(Method::TeamList)?;
+        let peers = self.execute_sync(Method::PeerList)?;
+        let outbox = self.with_store(|store| store.list_outbound(50))?;
+        let overlaps = self.with_store(|store| store.file_overlaps(900))?;
+        let questions = self.with_store(|store| store.list_questions(Some("pending")))?;
+        let anchor = self.anchor_status()?;
+        Ok(json!({
+            "status": status,
+            "network": net,
+            "sessions": directory.get("sessions").cloned().unwrap_or(Value::Null),
+            "teams": teams.get("teams").cloned().unwrap_or(Value::Null),
+            "peers": peers.get("peers").cloned().unwrap_or(Value::Null),
+            "outbox": outbox,
+            "overlaps": overlaps,
+            "questions": questions,
+            "anchor": anchor,
+        }))
+    }
+
+    /// Run one of the synchronous, side-effect-free read methods the overview
+    /// aggregates. Keeps the overview from duplicating their JSON shaping.
+    fn execute_sync(&self, method: Method) -> Result<Value> {
+        match method {
+            Method::TeamList => {
+                let teams = self.with_store(|store| store.list_teams())?;
+                let me = self.peer_id();
+                let mut out = Vec::new();
+                for team in teams {
+                    let members = self.with_store(|store| store.list_members(&team.team_id))?;
+                    out.push(json!({
+                        "team_id": team.team_id,
+                        "name": team.name,
+                        "admin_peer": team.admin_peer,
+                        "created_at": team.created_at,
+                        "is_admin": team.admin_peer == me,
+                        "members": members.len(),
+                    }));
+                }
+                Ok(json!({ "teams": out }))
+            }
+            Method::PeerList => {
+                let peers = self.with_store(|store| store.list_peers())?;
+                let network = self.network();
+                let out: Vec<Value> = peers
+                    .into_iter()
+                    .map(|peer| {
+                        let connected = network
+                            .as_ref()
+                            .map(|network| network.is_connected(&peer.peer_id))
+                            .unwrap_or(false);
+                        let status = if connected {
+                            "connected"
+                        } else if matches!(peer.status.as_str(), "left" | "connecting" | "revoked")
+                        {
+                            peer.status.as_str()
+                        } else {
+                            "offline"
+                        };
+                        json!({
+                            "peer_id": peer.peer_id,
+                            "label": peer.label,
+                            "status": status,
+                            "connected": connected,
+                            "last_seen": peer.last_seen,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "peers": out }))
+            }
+            other => Err(Error::Other(format!("{other:?} is not an aggregate read"))),
         }
     }
     /// Resolve a message: locally when the recipient is local, otherwise
     /// through the team directory to the owning machine.
-    fn send_message(&self, params: SendMessageParams) -> Result<Value> {
+    fn send_message(&self, mut params: SendMessageParams) -> Result<Value> {
+        // The recipient may be an exact session key or a looser selector; it is
+        // resolved to exactly one session or the send fails explicitly.
+        let (resolved, scope) =
+            self.resolve_recipient(Some(&params.sender_key), &params.recipient_key)?;
+        params.recipient_key = resolved.session_key.clone();
+        let mut result = self.deliver_message(params)?;
+        if scope != crate::resolve::Scope::ExactKey
+            && let Some(object) = result.as_object_mut()
+        {
+            object.insert("resolved_recipient".into(), json!(resolved));
+            object.insert("matched_by".into(), json!(scope));
+        }
+        Ok(result)
+    }
+
+    fn deliver_message(&self, params: SendMessageParams) -> Result<Value> {
         let local = self.with_store(|store| store.get_session(&params.recipient_key))?;
         if local.is_some() {
             let message = self.with_store(|store| {
@@ -537,6 +842,7 @@ impl Daemon {
                     sender_key: params.sender_key.clone(),
                     recipient_key: params.recipient_key.clone(),
                     body: params.body.clone(),
+                    reply_to: params.reply_to.clone(),
                 })
             })?;
             self.notify.notify_one();
@@ -555,6 +861,7 @@ impl Daemon {
                 &params.recipient_key,
                 &params.body,
                 &owner,
+                params.reply_to.as_deref(),
             )
         })?;
 
@@ -588,6 +895,8 @@ impl Daemon {
                 recipient_session: message.recipient_key.clone(),
                 body: message.body.clone(),
                 created_at: message.created_at,
+                reply_to: message.reply_to.clone(),
+                thread_id: message.thread_id.clone(),
             })),
         )
     }
@@ -635,50 +944,200 @@ impl Daemon {
         }))
     }
 
-    /// Local and remote sessions in one directory.
-    fn directory(&self) -> Result<Value> {
-        let mut entries: Vec<Value> = self
+    /// Inspect (`apply = None`) or apply agent configuration. Applying always
+    /// backs the existing files up first; it only touches the files setup
+    /// manages.
+    fn setup_report(&self, apply: Option<crate::agents::Agent>) -> Result<Value> {
+        let pinned = std::env::var_os(crate::config::ENV_DATA_DIR)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+        let host = crate::agents::Host::from_env(pinned)?;
+        let selected: Vec<crate::agents::Agent> = match apply {
+            Some(agent) => vec![agent],
+            None => crate::agents::Agent::ALL.to_vec(),
+        };
+        let report = crate::agents::run_setup(&host, &selected, apply.is_none());
+        Ok(report.to_json())
+    }
+
+    /// Every addressable session, local and remote, with derived liveness.
+    fn candidates(&self) -> Result<Vec<Candidate>> {
+        let now = crate::store::now_seconds();
+        let me = self.peer_id();
+        let mut out: Vec<Candidate> = self
             .with_store(|store| store.list_sessions())?
             .into_iter()
-            .map(|session| {
+            .map(|session| Candidate {
+                liveness: resolve::liveness(&session.status, session.last_seen, now),
+                provider: resolve::provider_of(session.agent_type.as_deref()),
+                session_key: session.session_key,
+                name: session.name,
+                agent_type: session.agent_type,
+                machine: me.clone(),
+                local: true,
+                working_dir: session.working_dir,
+                repo: session.repo,
+                branch: session.branch,
+                status: session.status,
+                activity: session.activity,
+                last_seen: session.last_seen,
+                reachable: true,
+            })
+            .collect();
+        let network = self.network();
+        for session in self.with_store(|store| store.list_remote_sessions())? {
+            let reachable = network
+                .as_ref()
+                .map(|network| network.is_connected(&session.peer_id))
+                .unwrap_or(false);
+            out.push(Candidate {
+                liveness: resolve::liveness(&session.status, session.last_seen, now),
+                provider: resolve::provider_of(session.agent_type.as_deref()),
+                session_key: session.session_key,
+                name: session.name,
+                agent_type: session.agent_type,
+                machine: session.peer_id,
+                local: false,
+                working_dir: None,
+                repo: session.repo,
+                branch: None,
+                status: session.status,
+                activity: session.activity,
+                last_seen: session.last_seen,
+                reachable,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Resolve a recipient selector for `caller` (a session key), or fail with
+    /// a precise error: not found, or ambiguous.
+    fn resolve_recipient(
+        &self,
+        caller: Option<&str>,
+        selector: &str,
+    ) -> Result<(Candidate, resolve::Scope)> {
+        let candidates = self.candidates()?;
+        let caller = match caller.map(str::trim).filter(|key| !key.is_empty()) {
+            Some(key) => {
+                self.with_store(|store| store.get_session(key))?
+                    .map(|s| resolve::Caller {
+                        provider: resolve::provider_of(s.agent_type.as_deref()),
+                        session_key: s.session_key,
+                        working_dir: s.working_dir,
+                        repo: s.repo,
+                    })
+            }
+            None => None,
+        };
+        match resolve::resolve(selector, caller.as_ref(), &candidates) {
+            resolve::Resolution::Unique(found, scope) => Ok((*found, scope)),
+            resolve::Resolution::Ambiguous(found) => Err(Error::Ambiguous(
+                resolve::ambiguity_message(selector, &found),
+            )),
+            resolve::Resolution::NoMatch(reason) => Err(Error::NotFound(format!(
+                "recipient session {selector}: {reason}"
+            ))),
+        }
+    }
+
+    /// Local and remote sessions in one directory.
+    fn directory(&self) -> Result<Value> {
+        let entries: Vec<Value> = self
+            .candidates()?
+            .into_iter()
+            .map(|c| {
                 json!({
-                    "session_key": session.session_key,
-                    "name": session.name,
-                    "agent_type": session.agent_type,
-                    "status": session.status,
-                    "activity": session.activity,
-                    "last_seen": session.last_seen,
-                    "local": true,
-                    "machine": self.peer_id(),
+                    "session_key": c.session_key,
+                    "name": c.name,
+                    "agent_type": c.agent_type,
+                    "provider": c.provider,
+                    "status": c.status,
+                    "liveness": c.liveness,
+                    "activity": c.activity,
+                    "last_seen": c.last_seen,
+                    "local": c.local,
+                    "machine": c.machine,
+                    "working_dir": c.working_dir,
+                    "repo": c.repo,
+                    "branch": c.branch,
+                    "reachable": c.reachable,
                 })
             })
             .collect();
-
-        for session in self.with_store(|store| store.list_remote_sessions())? {
-            let reachable = self
-                .network()
-                .map(|network| network.is_connected(&session.peer_id))
-                .unwrap_or(false);
-            entries.push(json!({
-                "session_key": session.session_key,
-                "name": session.name,
-                "agent_type": session.agent_type,
-                "status": session.status,
-                "activity": session.activity,
-                "last_seen": session.last_seen,
-                "local": false,
-                "machine": session.peer_id,
-                "reachable": reachable,
-            }));
-        }
-
         Ok(json!({ "sessions": entries }))
     }
 
+    /// Wait for the reply to a message, without polling the database.
+    ///
+    /// Subscribes to the store's message events first, then checks, then
+    /// sleeps until a message arrives or the deadline passes. Only a message
+    /// whose `reply_to` is the awaited id is returned; everything else is
+    /// ignored. A timeout is reported as such, with what is known about the
+    /// original message and the recipient.
+    async fn wait_reply(&self, params: WaitReplyParams) -> Result<Value> {
+        let timeout = Duration::from_secs(params.timeout_seconds.unwrap_or(30).clamp(1, 900));
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mark_read = params.mark_read.unwrap_or(true);
+        let mut events = self.with_store(|store| Ok(store.subscribe()))?;
+        loop {
+            let found = self.with_store(|store| {
+                store.find_reply(
+                    &params.session_key,
+                    &params.message_id,
+                    params.from.as_deref(),
+                )
+            })?;
+            if let Some(reply) = found {
+                if mark_read {
+                    let id = reply.id.clone();
+                    self.with_store(|store| {
+                        store.mark_read(MarkReadParams {
+                            session_key: params.session_key.clone(),
+                            message_ids: Some(vec![id]),
+                        })
+                    })?;
+                }
+                let sender = self
+                    .candidates()?
+                    .into_iter()
+                    .find(|c| c.session_key == reply.sender_key);
+                return Ok(json!({
+                    "status": "reply",
+                    "reply": reply,
+                    "from": sender,
+                    "in_reply_to": params.message_id,
+                    "waited_seconds": (timeout - deadline.saturating_duration_since(tokio::time::Instant::now())).as_secs(),
+                }));
+            }
+            match tokio::time::timeout_at(deadline, events.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => break,
+                Err(_) => break,
+            }
+        }
+        let original = self.with_store(|store| store.get_message(&params.message_id))?;
+        let recipient = match &original {
+            Some(message) => self
+                .candidates()?
+                .into_iter()
+                .find(|c| c.session_key == message.recipient_key),
+            None => None,
+        };
+        Ok(json!({
+            "status": "timeout",
+            "in_reply_to": params.message_id,
+            "waited_seconds": timeout.as_secs(),
+            "original_message": original,
+            "recipient": recipient,
+            "note": "No reply arrived. The message was stored; the recipient may not have read it yet \
+        (see original_message.state and recipient.liveness). Do not assume agreement.",
+        }))
+    }
     fn status(&self) -> Result<Value> {
         let (sessions, messages) = self.with_store(|store| store.counts())?;
         Ok(json!({
-            "daemon": "reason-network",
+            "daemon": "crosstalk",
             "version": VERSION,
             "pid": std::process::id(),
             "endpoint": self.config.endpoint.display(),
@@ -695,7 +1154,7 @@ impl Daemon {
             .unwrap_or_else(|| "claude".to_string());
         let network = self.network();
         Ok(json!({
-            "daemon": "reason-network",
+            "daemon": "crosstalk",
             "version": VERSION,
             "pid": std::process::id(),
             "endpoint": self.config.endpoint.display(),
@@ -845,6 +1304,8 @@ impl Daemon {
                 created_at: outbound.created_at,
                 state: "sent".into(),
                 delivered: false,
+                reply_to: outbound.reply_to.clone(),
+                thread_id: outbound.thread_id.clone(),
             };
             match self.transmit(&network, &message, peer) {
                 Ok(()) => {
@@ -1011,6 +1472,7 @@ impl Daemon {
                         sender_key: session_key,
                         recipient_key: reply_to,
                         body: text,
+                        reply_to: None,
                     })
                 });
                 if let Err(error) = result {
@@ -1140,7 +1602,7 @@ mod tests {
     async fn an_agent_turn_is_stored_as_a_reply_message() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = Daemon::new(Config::with_data_dir(dir.path())).unwrap();
-        for key in ["agent", "human"] {
+        for key in ["agent", "asker"] {
             daemon
                 .with_store(|store| {
                     store.register(RegisterParams {
@@ -1154,14 +1616,14 @@ mod tests {
 
         daemon.handle_delivery_event(ClaudeEvent::TurnComplete {
             session_key: "agent".into(),
-            reply_to: Some("human".into()),
+            reply_to: Some("asker".into()),
             text: "the answer is 4".into(),
         });
 
         let inbox = daemon
             .with_store(|store| {
                 store.inbox(InboxParams {
-                    session_key: "human".into(),
+                    session_key: "asker".into(),
                     limit: None,
                     unread_only: None,
                 })

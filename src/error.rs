@@ -30,6 +30,9 @@ pub enum Error {
     #[error("delivery error: {0}")]
     Delivery(String),
 
+    #[error("ambiguous recipient: {0}")]
+    Ambiguous(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -46,6 +49,7 @@ impl Error {
             Error::InvalidRequest(_) => "invalid_request",
             Error::DaemonUnavailable(_) => "daemon_unavailable",
             Error::Delivery(_) => "delivery_error",
+            Error::Ambiguous(_) => "ambiguous_recipient",
             Error::Other(_) => "error",
         }
     }

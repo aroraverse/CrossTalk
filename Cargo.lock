@@ -458,6 +458,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "crosstalk"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "data-encoding",
+ "iroh",
+ "iroh-mdns-address-lookup",
+ "reqwest",
+ "rmcp",
+ "rusqlite",
+ "rustls",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml_edit",
+ "webpki-roots",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2518,29 +2541,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core",
-]
-
-[[package]]
-name = "reason-network"
-version = "0.1.0"
-dependencies = [
- "clap",
- "data-encoding",
- "iroh",
- "iroh-mdns-address-lookup",
- "reqwest",
- "rmcp",
- "rusqlite",
- "rustls",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml_edit",
- "webpki-roots",
 ]
 
 [[package]]

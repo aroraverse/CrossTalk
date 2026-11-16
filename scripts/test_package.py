@@ -26,7 +26,7 @@ class PackagingTest(unittest.TestCase):
         (self.docs / "INSTALL.md").write_text("install")
         (self.docs / "install.sh").write_text("#!/bin/sh\n")
         (self.docs / "install.ps1").write_text("param()\n")
-        self.binary = self.root / "reason-network-built"
+        self.binary = self.root / "crosstalk-built"
         self.binary.write_bytes(b"binary bytes")
         self.out = self.root / "dist"
 
@@ -37,34 +37,34 @@ class PackagingTest(unittest.TestCase):
         # Mirrors `artifact_names_round_trip` in src/update.rs.
         self.assertEqual(
             package.package_name("0.2.0", "x86_64-pc-windows-msvc"),
-            "reason-network-0.2.0-x86_64-pc-windows-msvc.zip",
+            "crosstalk-0.2.0-x86_64-pc-windows-msvc.zip",
         )
         self.assertEqual(
             package.package_name("0.2.0", "aarch64-apple-darwin"),
-            "reason-network-0.2.0-aarch64-apple-darwin.tar.gz",
+            "crosstalk-0.2.0-aarch64-apple-darwin.tar.gz",
         )
         self.assertEqual(
             package.binary_name("0.2.0", "x86_64-pc-windows-msvc"),
-            "reason-network-0.2.0-x86_64-pc-windows-msvc.exe",
+            "crosstalk-0.2.0-x86_64-pc-windows-msvc.exe",
         )
         self.assertEqual(
             package.binary_name("0.2.0", "x86_64-unknown-linux-gnu"),
-            "reason-network-0.2.0-x86_64-unknown-linux-gnu",
+            "crosstalk-0.2.0-x86_64-unknown-linux-gnu",
         )
 
     def test_unix_package_contents_and_permissions(self):
         target = "x86_64-unknown-linux-gnu"
         archive, bare = package.package(self.binary, target, "1.2.3", self.out, "abc", self.docs)
-        self.assertEqual(archive.name, "reason-network-1.2.3-x86_64-unknown-linux-gnu.tar.gz")
+        self.assertEqual(archive.name, "crosstalk-1.2.3-x86_64-unknown-linux-gnu.tar.gz")
         self.assertEqual(bare.read_bytes(), b"binary bytes")
         with tarfile.open(archive) as tar:
             names = sorted(tar.getnames())
-            top = "reason-network-1.2.3-x86_64-unknown-linux-gnu"
+            top = "crosstalk-1.2.3-x86_64-unknown-linux-gnu"
             self.assertEqual(
                 names,
-                sorted(f"{top}/{name}" for name in ("reason-network", "README.md", "INSTALL.md", "VERSION")),
+                sorted(f"{top}/{name}" for name in ("crosstalk", "README.md", "INSTALL.md", "VERSION")),
             )
-            self.assertEqual(tar.getmember(f"{top}/reason-network").mode & 0o777, 0o755)
+            self.assertEqual(tar.getmember(f"{top}/crosstalk").mode & 0o777, 0o755)
             version = tar.extractfile(f"{top}/VERSION").read().decode()
             self.assertIn("version: 1.2.3", version)
             self.assertIn(f"target: {target}", version)
@@ -76,9 +76,9 @@ class PackagingTest(unittest.TestCase):
         )
         self.assertTrue(bare.name.endswith(".exe"))
         with zipfile.ZipFile(archive) as zf:
-            top = "reason-network-1.2.3-x86_64-pc-windows-msvc"
-            self.assertIn(f"{top}/reason-network.exe", zf.namelist())
-            self.assertEqual(zf.read(f"{top}/reason-network.exe"), b"binary bytes")
+            top = "crosstalk-1.2.3-x86_64-pc-windows-msvc"
+            self.assertIn(f"{top}/crosstalk.exe", zf.namelist())
+            self.assertEqual(zf.read(f"{top}/crosstalk.exe"), b"binary bytes")
 
     def test_sums_cover_every_release_file(self):
         for target in package.TARGETS:

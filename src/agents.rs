@@ -1,6 +1,6 @@
 //! First-class coding-agent integrations (M2).
 //!
-//! `reason-network setup` configures two agents:
+//! `crosstalk setup` configures two agents:
 //!
 //! * **Claude Code** — the MCP server goes into the user-scope `mcpServers`
 //!   of `~/.claude.json` (the file `claude mcp add --scope user` writes), and
@@ -9,7 +9,7 @@
 //!   `~/.codex/config.toml` and lifecycle hooks into its `[hooks]` tables.
 //!
 //! Both honour the agents' own overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
-//! Only the `reason-network` entries are added or replaced; everything else
+//! Only the `crosstalk` entries are added or replaced; everything else
 //! in those files is preserved, a backup is written before any change, and a
 //! repeated run is a no-op.
 //!
@@ -26,7 +26,7 @@ use crate::error::{Error, Result};
 use crate::util;
 
 /// Name of the MCP server entry in every agent configuration.
-pub const SERVER_NAME: &str = "reason-network";
+pub const SERVER_NAME: &str = "crosstalk";
 
 /// Hook timeout written into agent configurations, in seconds.
 const HOOK_TIMEOUT_SECS: i64 = 10;
@@ -40,11 +40,23 @@ pub enum Agent {
     Claude,
     /// OpenAI Codex CLI.
     Codex,
+    /// Cursor (desktop app or `cursor-agent` CLI). MCP server only, no hooks.
+    Cursor,
+    /// Kiro CLI (`kiro-cli`, also the Kiro IDE). MCP server only, no hooks.
+    Kiro,
+    /// OpenCode. MCP server only, no hooks.
+    OpenCode,
 }
 
 impl Agent {
     /// Every supported agent, in setup order.
-    pub const ALL: [Agent; 2] = [Agent::Claude, Agent::Codex];
+    pub const ALL: [Agent; 5] = [
+        Agent::Claude,
+        Agent::Codex,
+        Agent::Cursor,
+        Agent::Kiro,
+        Agent::OpenCode,
+    ];
 
     /// Parse the `--agent` value. `all` expands to every supported agent.
     pub fn parse_selection(text: &str) -> Result<Vec<Agent>> {
@@ -59,9 +71,12 @@ impl Agent {
         match text.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => Ok(Agent::Claude),
             "codex" | "codex-cli" => Ok(Agent::Codex),
+            "cursor" | "cursor-agent" | "cursor-cli" => Ok(Agent::Cursor),
+            "kiro" | "kiro-cli" => Ok(Agent::Kiro),
+            "opencode" | "open-code" => Ok(Agent::OpenCode),
             other => Err(Error::InvalidRequest(format!(
-                "unsupported agent `{other}`: supported values are `claude`, `codex` and `all`. \
-Any other MCP-compatible agent can run `reason-network mcp --session-key <key>` as a stdio MCP server."
+                "unsupported agent `{other}`: supported values are `claude`, `codex`, `cursor`, `kiro`, `opencode` and `all`. \
+Any other MCP-compatible agent can run `crosstalk mcp --session-key <key>` as a stdio MCP server."
             ))),
         }
     }
@@ -71,6 +86,9 @@ Any other MCP-compatible agent can run `reason-network mcp --session-key <key>` 
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Cursor => "cursor",
+            Agent::Kiro => "kiro",
+            Agent::OpenCode => "opencode",
         }
     }
 
@@ -79,6 +97,9 @@ Any other MCP-compatible agent can run `reason-network mcp --session-key <key>` 
         match self {
             Agent::Claude => "Claude Code",
             Agent::Codex => "OpenAI Codex CLI",
+            Agent::Cursor => "Cursor",
+            Agent::Kiro => "Kiro CLI",
+            Agent::OpenCode => "OpenCode",
         }
     }
 
@@ -92,15 +113,34 @@ Any other MCP-compatible agent can run `reason-network mcp --session-key <key>` 
         match self {
             Agent::Claude => "claude-code",
             Agent::Codex => "codex",
+            Agent::Cursor => "cursor",
+            Agent::Kiro => "kiro",
+            Agent::OpenCode => "opencode",
         }
     }
 
     /// Executable name looked up on `PATH`.
     pub fn executable_name(self) -> &'static str {
+        self.executable_names()[0]
+    }
+
+    /// Every executable name that counts as this agent being installed, in
+    /// order of preference. Cursor ships the `cursor-agent` CLI and the
+    /// `cursor` launcher of the desktop app; either one reads `~/.cursor/mcp.json`.
+    pub fn executable_names(self) -> &'static [&'static str] {
         match self {
-            Agent::Claude => "claude",
-            Agent::Codex => "codex",
+            Agent::Claude => &["claude"],
+            Agent::Codex => &["codex"],
+            Agent::Cursor => &["cursor-agent", "cursor"],
+            Agent::Kiro => &["kiro-cli", "kiro"],
+            Agent::OpenCode => &["opencode"],
         }
+    }
+
+    /// True when the integration installs lifecycle hooks. Cursor, Kiro and
+    /// OpenCode are integrated through their MCP server only.
+    pub fn has_hooks(self) -> bool {
+        matches!(self, Agent::Claude | Agent::Codex)
     }
 
     /// What to do when the agent is not installed.
@@ -112,12 +152,30 @@ Any other MCP-compatible agent can run `reason-network mcp --session-key <key>` 
             Agent::Codex => {
                 "install the Codex CLI (https://developers.openai.com/codex/cli, e.g. `npm install -g @openai/codex`) and make sure `codex` is on PATH, then re-run setup"
             }
+            Agent::Cursor => {
+                "install Cursor (https://cursor.com) or its CLI (`cursor-agent`, https://cursor.com/cli) and make sure `cursor` or `cursor-agent` is on PATH, then re-run setup"
+            }
+            Agent::Kiro => {
+                "install the Kiro CLI (https://kiro.dev/cli) and make sure `kiro-cli` is on PATH, then re-run setup"
+            }
+            Agent::OpenCode => {
+                "install OpenCode (https://opencode.ai, e.g. `npm install -g opencode-ai`) and make sure `opencode` is on PATH, then re-run setup"
+            }
         }
     }
 
-    /// Lifecycle events this integration hooks into.
+    /// Lifecycle events this integration hooks into (none for Cursor).
     pub fn hook_events(self) -> &'static [&'static str] {
-        &["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"]
+        if !self.has_hooks() {
+            return &[];
+        }
+        &[
+            "SessionStart",
+            "UserPromptSubmit",
+            "PostToolUse",
+            "Stop",
+            "SessionEnd",
+        ]
     }
 
     fn hook_timeout(self, event: &str) -> i64 {
@@ -142,7 +200,7 @@ pub struct Host {
     pub claude_config_dir: Option<PathBuf>,
     /// `CODEX_HOME`, when set.
     pub codex_home: Option<PathBuf>,
-    /// The `reason-network` executable agents should launch.
+    /// The `crosstalk` executable agents should launch.
     pub exe: PathBuf,
     /// A non-default data directory to pin into the agent configuration.
     pub data_dir: Option<PathBuf>,
@@ -190,9 +248,37 @@ impl Host {
             .join("config.toml")
     }
 
+    /// `~/.cursor/mcp.json`: Cursor's global MCP configuration, read by both
+    /// the desktop app and the `cursor-agent` CLI.
+    pub fn cursor_mcp(&self) -> PathBuf {
+        self.home.join(".cursor").join("mcp.json")
+    }
+
+    /// `~/.kiro/settings/mcp.json`: Kiro's user-level MCP configuration,
+    /// shared by the Kiro CLI and the Kiro IDE.
+    pub fn kiro_mcp(&self) -> PathBuf {
+        self.home.join(".kiro").join("settings").join("mcp.json")
+    }
+
+    /// OpenCode's global configuration: `~/.config/opencode/opencode.json`,
+    /// or `opencode.jsonc` when only that one exists.
+    pub fn opencode_config(&self) -> PathBuf {
+        let dir = self.home.join(".config").join("opencode");
+        let json = dir.join("opencode.json");
+        let jsonc = dir.join("opencode.jsonc");
+        if !json.exists() && jsonc.exists() {
+            jsonc
+        } else {
+            json
+        }
+    }
+
     /// The installed executable of an agent, if any.
     pub fn find_agent(&self, agent: Agent) -> Option<PathBuf> {
-        util::find_executable(agent.executable_name(), &self.path)
+        agent
+            .executable_names()
+            .iter()
+            .find_map(|name| util::find_executable(name, &self.path))
     }
 
     /// The configuration files an agent integration touches.
@@ -200,16 +286,68 @@ impl Host {
         match agent {
             Agent::Claude => vec![self.claude_json(), self.claude_settings()],
             Agent::Codex => vec![self.codex_config()],
+            Agent::Cursor => vec![self.cursor_mcp()],
+            Agent::Kiro => vec![self.kiro_mcp()],
+            Agent::OpenCode => vec![self.opencode_config()],
         }
     }
 
     /// The command line an agent runs for every lifecycle hook.
     pub fn hook_command(&self, agent: Agent) -> String {
+        // Codex on Windows runs `pwsh -NoProfile -Command "<command>"`. A
+        // command that starts with a quoted path is then a PowerShell string
+        // expression, not an invocation, and fails with a parse error (exit
+        // code 1) before this program ever starts. The call operator `&` is
+        // required for any path, and single quotes avoid `$` expansion.
+        if cfg!(windows) && agent == Agent::Codex {
+            let mut command = format!(
+                "& {} hook --agent {}",
+                quote_powershell(&self.exe),
+                agent.id()
+            );
+            if let Some(dir) = &self.data_dir {
+                command.push_str(&format!(" --data-dir {}", quote_powershell(dir)));
+            }
+            return command;
+        }
         let mut command = format!("{} hook --agent {}", quote(&self.exe), agent.id());
         if let Some(dir) = &self.data_dir {
             command.push_str(&format!(" --data-dir {}", quote(dir)));
         }
         command
+    }
+
+    /// The lifecycle hook handler written into Claude Code's settings.
+    ///
+    /// On Windows Claude Code runs a hook `command` through Git Bash when it
+    /// finds it and through PowerShell otherwise. A quoted path followed by
+    /// arguments is valid bash but a PowerShell parse error (exit code 1,
+    /// before this program starts); `& '…'` is the reverse. The exec form —
+    /// `command` is the executable, `args` its arguments — is spawned without
+    /// any shell, so it works in both cases and needs no quoting.
+    pub fn claude_hook_handler(&self, timeout: i64) -> Value {
+        if cfg!(windows) {
+            let mut args = vec![
+                "hook".to_string(),
+                "--agent".to_string(),
+                Agent::Claude.id().to_string(),
+            ];
+            if let Some(dir) = &self.data_dir {
+                args.push("--data-dir".into());
+                args.push(dir.display().to_string());
+            }
+            return json!({
+                "type": "command",
+                "command": self.exe_text(),
+                "args": args,
+                "timeout": timeout,
+            });
+        }
+        json!({
+            "type": "command",
+            "command": self.hook_command(Agent::Claude),
+            "timeout": timeout,
+        })
     }
 
     fn mcp_args(&self, agent: Agent) -> Vec<String> {
@@ -264,9 +402,15 @@ fn quote(path: &Path) -> String {
     if plain { text } else { format!("\"{text}\"") }
 }
 
+/// Quote a path as a PowerShell single-quoted string literal.
+fn quote_powershell(path: &Path) -> String {
+    let text = path.display().to_string().replace('\\', "/");
+    format!("'{}'", text.replace('\'', "''"))
+}
+
 /// True when a hook command was written by this integration.
 fn is_our_hook(command: &str, agent: Agent) -> bool {
-    command.contains("reason-network") && command.contains(&format!("hook --agent {}", agent.id()))
+    command.contains("crosstalk") && command.contains(&format!("hook --agent {}", agent.id()))
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +430,17 @@ pub fn workspace(agent: Option<Agent>, hinted: Option<&Path>) -> PathBuf {
     if let Some(dir) = hinted.filter(|dir| !dir.as_os_str().is_empty()) {
         return dir.to_path_buf();
     }
+    // Set by an agent's MCP configuration, e.g. Cursor's `${workspaceFolder}`.
+    if let Some(dir) = env_path(crate::config::ENV_WORKSPACE).filter(|dir| usable_workspace(dir)) {
+        return dir;
+    }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// A workspace hint is usable when the agent actually interpolated it (no
+/// leftover `${...}`) and it names an existing directory.
+fn usable_workspace(dir: &Path) -> bool {
+    !dir.to_string_lossy().contains("${") && dir.is_dir()
 }
 
 /// Stable session key for an agent working in a directory:
@@ -417,13 +571,61 @@ pub fn plan(agent: Agent, host: &Host) -> Result<Plan> {
             });
             if hooks_changed {
                 notes.push(
-                    "Codex skips new or changed hooks until you trust them: start `codex`, run `/hooks` and trust the reason-network entries (the MCP tools work without them)"
+                    "Codex skips new or changed hooks until you trust them: start `codex`, run `/hooks` and trust the crosstalk entries (the MCP tools work without them)"
                         .to_string(),
                 );
             }
             if !change.is_noop() {
                 notes
                     .push("restart running Codex sessions so they load the MCP server".to_string());
+            }
+            vec![change]
+        }
+        Agent::Cursor => {
+            let change = plan_cursor_mcp(host)?;
+            if !change.is_noop() {
+                notes.push(
+                    "restart Cursor (or run \"Developer: Reload Window\") and check that `crosstalk` is enabled under Cursor Settings → MCP; in the CLI run `cursor-agent mcp enable crosstalk`"
+                        .to_string(),
+                );
+                notes.push(
+                    "Cursor is integrated through MCP only (no hooks): its agent reads messages by calling `check_inbox`"
+                        .to_string(),
+                );
+            }
+            vec![change]
+        }
+        Agent::Kiro => {
+            let change = plan_kiro_mcp(host)?;
+            if !change.is_noop() {
+                notes.push(
+                    "restart `kiro-cli` from your project folder (the server takes its project from there); `kiro-cli mcp list` shows the entry"
+                        .to_string(),
+                );
+                notes.push(
+                    "Kiro is integrated through MCP only (no hooks): its agent reads messages by calling `check_inbox`"
+                        .to_string(),
+                );
+            }
+            vec![change]
+        }
+        Agent::OpenCode => {
+            let change = plan_opencode_mcp(host)?;
+            if !change.is_noop() {
+                notes.push(
+                    "restart OpenCode from your project folder; `opencode mcp list` shows `crosstalk`"
+                        .to_string(),
+                );
+                notes.push(
+                    "OpenCode is integrated through MCP only (no hooks): its agent reads messages by calling `check_inbox`"
+                        .to_string(),
+                );
+                if opencode_imports_claude_mcp(host) {
+                    notes.push(
+                        "the oh-my-openagent plugin also imports Claude Code's MCP servers, so OpenCode would act as your Claude session too: add `\"claude_code\": { \"mcp\": false }` to ~/.config/opencode/oh-my-openagent.json"
+                            .to_string(),
+                    );
+                }
             }
             vec![change]
         }
@@ -538,9 +740,160 @@ fn claude_mcp_entry(host: &Host) -> Value {
 }
 
 fn plan_claude_mcp(host: &Host) -> Result<FileChange> {
-    let path = host.claude_json();
+    plan_json_mcp(host.claude_json(), claude_mcp_entry(host), " (user scope)")
+}
+
+/// The `crosstalk` entry in Cursor's `mcp.json`.
+///
+/// `${workspaceFolder}` is interpolated by Cursor, so the MCP server learns
+/// which project it serves and derives that project's session key.
+fn cursor_mcp_entry(host: &Host) -> Value {
+    let mut env: Map<String, Value> = host
+        .mcp_env()
+        .into_iter()
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect();
+    env.insert(
+        crate::config::ENV_WORKSPACE.to_string(),
+        Value::String("${workspaceFolder}".into()),
+    );
+    json!({
+        "type": "stdio",
+        "command": host.exe_text(),
+        "args": host.mcp_args(Agent::Cursor),
+        "env": env,
+    })
+}
+
+fn plan_cursor_mcp(host: &Host) -> Result<FileChange> {
+    plan_json_mcp(host.cursor_mcp(), cursor_mcp_entry(host), "")
+}
+
+/// `mcp_env` as a JSON object.
+fn mcp_env_object(host: &Host) -> Map<String, Value> {
+    host.mcp_env()
+        .into_iter()
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect()
+}
+
+/// The `crosstalk` entry in Kiro's `mcp.json`. Kiro starts the server in the
+/// directory `kiro-cli` runs in, which is the project.
+fn kiro_mcp_entry(host: &Host) -> Value {
+    json!({
+        "command": host.exe_text(),
+        "args": host.mcp_args(Agent::Kiro),
+        "env": mcp_env_object(host),
+        "disabled": false,
+    })
+}
+
+fn plan_kiro_mcp(host: &Host) -> Result<FileChange> {
+    plan_json_mcp(host.kiro_mcp(), kiro_mcp_entry(host), "")
+}
+
+/// The `crosstalk` entry under `mcp.servers` of OpenCode's configuration. A
+/// local server's `command` is one array; OpenCode starts it in the project.
+fn opencode_mcp_entry(host: &Host) -> Value {
+    let mut command = vec![host.exe_text()];
+    command.extend(host.mcp_args(Agent::OpenCode));
+    let mut entry = json!({ "type": "local", "command": command });
+    let env = mcp_env_object(host);
+    if !env.is_empty() {
+        entry["environment"] = Value::Object(env);
+    }
+    entry
+}
+
+/// Add or replace `mcp.servers.crosstalk` in OpenCode's configuration,
+/// leaving every other key untouched. A `.jsonc` file with comments does not
+/// parse as JSON and is reported, never rewritten without its comments.
+fn plan_opencode_mcp(host: &Host) -> Result<FileChange> {
+    let path = host.opencode_config();
     let (original, mut object) = read_json_object(&path)?;
-    let desired = claude_mcp_entry(host);
+    let desired = opencode_mcp_entry(host);
+    let current = object
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
+        .and_then(|servers| servers.get(SERVER_NAME))
+        .cloned();
+    if current.as_ref() == Some(&desired) {
+        return Ok(FileChange {
+            path,
+            updated: original.clone().unwrap_or_default(),
+            original,
+            actions: vec!["MCP server `crosstalk` already configured".into()],
+        });
+    }
+    let not_object = |key: &str| {
+        Error::Other(format!(
+            "`{key}` in {} is not an object; fix it and re-run setup (nothing was changed)",
+            path.display()
+        ))
+    };
+    let mcp = object
+        .entry("mcp")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| not_object("mcp"))?;
+    let servers = mcp
+        .entry("servers")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| not_object("mcp.servers"))?;
+    servers.insert(SERVER_NAME.to_string(), desired);
+    let action = if current.is_some() {
+        "update MCP server `crosstalk` (mcp.servers)"
+    } else {
+        "add MCP server `crosstalk` (mcp.servers)"
+    };
+    Ok(FileChange {
+        updated: render_json(&original, object)?,
+        path,
+        original,
+        actions: vec![action.to_string()],
+    })
+}
+
+/// True when OpenCode loads a plugin that imports Claude Code's MCP servers
+/// (oh-my-openagent / oh-my-opencode). OpenCode would then also start Claude's
+/// `crosstalk` entry and act as the Claude session of the same folder.
+fn opencode_imports_claude_mcp(host: &Host) -> bool {
+    let Ok((_, object)) = read_json_object(&host.opencode_config()) else {
+        return false;
+    };
+    let plugin_loaded = object
+        .get("plugin")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|plugin| {
+            plugin.starts_with("oh-my-openagent") || plugin.starts_with("oh-my-opencode")
+        });
+    if !plugin_loaded {
+        return false;
+    }
+    // The plugin's own setting `"claude_code": { "mcp": false }` turns the
+    // import off; then there is nothing to warn about.
+    let dir = host.home.join(".config").join("opencode");
+    let disabled = ["oh-my-openagent.json", "oh-my-opencode.json"]
+        .iter()
+        .filter_map(|name| read_json_object(&dir.join(name)).ok())
+        .any(|(_, settings)| {
+            settings
+                .get("claude_code")
+                .and_then(|claude| claude.get("mcp"))
+                .and_then(Value::as_bool)
+                == Some(false)
+        });
+    !disabled
+}
+
+/// Add or replace the `crosstalk` server under `mcpServers` of a JSON file,
+/// leaving every other key and server untouched.
+fn plan_json_mcp(path: PathBuf, desired: Value, scope: &str) -> Result<FileChange> {
+    let (original, mut object) = read_json_object(&path)?;
     let current = object
         .get("mcpServers")
         .and_then(|servers| servers.get(SERVER_NAME))
@@ -550,13 +903,13 @@ fn plan_claude_mcp(host: &Host) -> Result<FileChange> {
             path,
             updated: original.clone().unwrap_or_default(),
             original,
-            actions: vec!["MCP server `reason-network` already configured".into()],
+            actions: vec!["MCP server `crosstalk` already configured".into()],
         });
     }
     let action = if current.is_some() {
-        "update MCP server `reason-network` (user scope)"
+        format!("update MCP server `crosstalk`{scope}")
     } else {
-        "add MCP server `reason-network` (user scope)"
+        format!("add MCP server `crosstalk`{scope}")
     };
     let servers = object
         .entry("mcpServers")
@@ -574,7 +927,7 @@ fn plan_claude_mcp(host: &Host) -> Result<FileChange> {
         updated: render_json(&original, object)?,
         path,
         original,
-        actions: vec![action.to_string()],
+        actions: vec![action],
     })
 }
 
@@ -582,12 +935,42 @@ fn json_handler_command(handler: &Value) -> Option<&str> {
     handler.get("command").and_then(Value::as_str)
 }
 
+/// True when a JSON hook handler was written by this integration, in either
+/// the shell form (`"<exe>" hook --agent claude`) or the exec form
+/// (`command` = executable, `args` = `["hook", "--agent", "claude", ...]`).
+fn json_is_our_hook(handler: &Value, agent: Agent) -> bool {
+    let Some(command) = json_handler_command(handler) else {
+        return false;
+    };
+    if is_our_hook(command, agent) {
+        return true;
+    }
+    let args: Vec<&str> = handler
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|args| args.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    command.contains("crosstalk") && args.starts_with(&["hook", "--agent", agent.id()])
+}
+
+/// One-line description of a hook handler for setup's report.
+fn describe_handler(handler: &Value) -> String {
+    let command = json_handler_command(handler).unwrap_or_default();
+    match handler.get("args").and_then(Value::as_array) {
+        Some(args) => {
+            let args: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
+            format!("{command} {} (exec form, no shell)", args.join(" "))
+        }
+        None => command.to_string(),
+    }
+}
+
 fn plan_claude_hooks(host: &Host) -> Result<FileChange> {
     let agent = Agent::Claude;
     let path = host.claude_settings();
     let (original, mut object) = read_json_object(&path)?;
-    let command = host.hook_command(agent);
-    let desired = |event: &str| json!({ "type": "command", "command": command, "timeout": agent.hook_timeout(event) });
+    let desired = |event: &str| host.claude_hook_handler(agent.hook_timeout(event));
+    let command = describe_handler(&desired("SessionStart"));
 
     let hooks = object
         .entry("hooks")
@@ -608,7 +991,7 @@ fn plan_claude_hooks(host: &Host) -> Result<FileChange> {
             .flatten()
             .filter_map(|group| group.get("hooks").and_then(Value::as_array))
             .flatten()
-            .filter(|handler| json_handler_command(handler).is_some_and(|c| is_our_hook(c, agent)))
+            .filter(|handler| json_is_our_hook(handler, agent))
             .cloned()
             .collect()
     };
@@ -639,9 +1022,7 @@ fn plan_claude_hooks(host: &Host) -> Result<FileChange> {
                 return true;
             };
             let before = handlers.len();
-            handlers.retain(|handler| {
-                !json_handler_command(handler).is_some_and(|c| is_our_hook(c, agent))
-            });
+            handlers.retain(|handler| !json_is_our_hook(handler, agent));
             if handlers.len() != before {
                 replaced = true;
                 return !handlers.is_empty();
@@ -706,13 +1087,13 @@ fn plan_codex(host: &Host) -> Result<FileChange> {
         toml_server_matches(item, &host.exe_text(), &desired_args, &desired_env)
     });
     if matches {
-        actions.push("MCP server `reason-network` already configured".to_string());
+        actions.push("MCP server `crosstalk` already configured".to_string());
     } else {
         actions.push(
             if current.is_some() {
-                "update MCP server `reason-network`"
+                "update MCP server `crosstalk`"
             } else {
-                "add MCP server `reason-network`"
+                "add MCP server `crosstalk`"
             }
             .to_string(),
         );
@@ -984,7 +1365,7 @@ pub enum Outcome {
     Applied(Plan, Vec<Applied>),
 }
 
-/// The result of `reason-network setup`.
+/// The result of `crosstalk setup`.
 #[derive(Debug, Clone)]
 pub struct SetupReport {
     /// Whether this was a dry run.
@@ -1084,8 +1465,8 @@ impl SetupReport {
         }
         out.push_str(&format!("MCP server command: {}\n", self.mcp_command));
         out.push_str(
-            "The daemon must be running for the tools to work: `reason-network service install` \
-then `reason-network service start`, or `reason-network daemon-start`. Check with `reason-network doctor`.\n",
+            "The daemon must be running for the tools to work: `crosstalk service install` \
+then `crosstalk service start`, or `crosstalk daemon-start`. Check with `crosstalk doctor`.\n",
         );
         out
     }
@@ -1178,7 +1559,7 @@ then `reason-network service start`, or `reason-network daemon-start`. Check wit
 // Inspection (used by `doctor`)
 // ---------------------------------------------------------------------------
 
-/// The state of one agent's Reason Network configuration.
+/// The state of one agent's Crosstalk configuration.
 #[derive(Debug, Clone)]
 pub struct ConfigStatus {
     /// The command of the configured MCP server, if any.
@@ -1225,6 +1606,37 @@ pub fn inspect(agent: Agent, host: &Host) -> ConfigStatus {
             }
             Err(error) => status.error = Some(error.to_string()),
         },
+        Agent::Cursor | Agent::Kiro => {
+            let path = if agent == Agent::Cursor {
+                host.cursor_mcp()
+            } else {
+                host.kiro_mcp()
+            };
+            match read_json_object(&path) {
+                Ok((_, object)) => {
+                    status.mcp_command = object
+                        .get("mcpServers")
+                        .and_then(|servers| servers.get(SERVER_NAME))
+                        .and_then(|server| server.get("command"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                Err(error) => status.error = Some(error.to_string()),
+            }
+        }
+        Agent::OpenCode => match read_json_object(&host.opencode_config()) {
+            Ok((_, object)) => {
+                status.mcp_command = object
+                    .get("mcp")
+                    .and_then(|mcp| mcp.get("servers"))
+                    .and_then(|servers| servers.get(SERVER_NAME))
+                    .and_then(|server| server.get("command"))
+                    .and_then(|command| command.get(0))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            Err(error) => status.error = Some(error.to_string()),
+        },
         Agent::Codex => match read_optional(&host.codex_config()) {
             Ok(text) => match text
                 .as_deref()
@@ -1250,6 +1662,9 @@ pub fn inspect(agent: Agent, host: &Host) -> ConfigStatus {
                 plan_claude_hooks(host).map(|hooks| mcp.is_noop() && hooks.is_noop())
             }),
             Agent::Codex => plan_codex(host).map(|change| change.is_noop()),
+            Agent::Cursor => plan_cursor_mcp(host).map(|change| change.is_noop()),
+            Agent::Kiro => plan_kiro_mcp(host).map(|change| change.is_noop()),
+            Agent::OpenCode => plan_opencode_mcp(host).map(|change| change.is_noop()),
         };
         match changes {
             Ok(up_to_date) => status.up_to_date = up_to_date,
@@ -1297,7 +1712,10 @@ mod tests {
 
     #[test]
     fn agent_selection_parses_all_and_rejects_unknown() {
-        assert_eq!(Agent::parse_selection("all").unwrap().len(), 2);
+        assert_eq!(Agent::parse_selection("all").unwrap().len(), 5);
+        assert_eq!(Agent::parse("kiro-cli").unwrap(), Agent::Kiro);
+        assert_eq!(Agent::parse("OpenCode").unwrap(), Agent::OpenCode);
+        assert_eq!(Agent::parse("cursor-agent").unwrap(), Agent::Cursor);
         assert_eq!(
             Agent::parse_selection("Claude").unwrap(),
             vec![Agent::Claude]
@@ -1316,13 +1734,35 @@ mod tests {
     #[test]
     fn our_hooks_are_recognised_by_agent() {
         assert!(is_our_hook(
-            "\"/x/reason-network\" hook --agent claude",
+            "\"/x/crosstalk\" hook --agent claude",
             Agent::Claude
         ));
         assert!(!is_our_hook(
-            "/x/reason-network hook --agent codex",
+            "/x/crosstalk hook --agent codex",
             Agent::Claude
         ));
         assert!(!is_our_hook("echo hook --agent claude", Agent::Claude));
+    }
+
+    #[test]
+    fn only_interpolated_existing_workspaces_are_used() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(usable_workspace(dir.path()));
+        assert!(!usable_workspace(Path::new("${workspaceFolder}")));
+        assert!(!usable_workspace(&dir.path().join("missing")));
+        assert!(!Agent::Cursor.has_hooks());
+        assert!(Agent::Cursor.hook_events().is_empty());
+    }
+
+    #[test]
+    fn exec_form_hooks_are_recognised_by_agent() {
+        let exec = json!({"command": "C:/x/crosstalk.exe", "args": ["hook", "--agent", "claude"]});
+        assert!(json_is_our_hook(&exec, Agent::Claude));
+        assert!(!json_is_our_hook(&exec, Agent::Codex));
+        let shell = json!({"command": "\"C:/x y/crosstalk.exe\" hook --agent claude"});
+        assert!(json_is_our_hook(&shell, Agent::Claude));
+        let foreign =
+            json!({"command": "C:/tools/lint.exe", "args": ["hook", "--agent", "claude"]});
+        assert!(!json_is_our_hook(&foreign, Agent::Claude));
     }
 }
