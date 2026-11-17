@@ -62,3 +62,9 @@ Thumbs.db
 # Showcase run captures (large, contain local paths)
 /demo/showcase/run/frames/
 /demo/showcase/run/logs/
+
+# Video material stays local
+/demo/showcase/video-kit/
+/demo/showcase/VIDEO_BRIEF.md
+/demo/showcase/run/capture.mjs
+/demo/showcase/run/extract.py
